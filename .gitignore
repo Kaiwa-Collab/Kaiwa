@@ -1,0 +1,34 @@
+# Node
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+hs_err_pid*
+replay_pid*
+
+# Environment files
+.env
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.cxx/
+
+# iOS
+ios/Pods/
+ios/build/
+
+# Cache / temp
+.bundle/
+swark-output/
+npx/
+
+# Editor
+.vscode/
+.DS_Store
+Thumbs.db
