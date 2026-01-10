@@ -14,6 +14,8 @@ import { launchImageLibrary } from 'react-native-image-picker';
 import { useUserData } from '../users';
 import chatService from './chatService';
 import {requestcamerapermission,requestgallerypermission} from '../../utils/permissions';
+import { getGitHubStatus } from '../../service/getGitHubStatus';
+import functions from '@react-native-firebase/functions';
 
 
 
@@ -194,85 +196,162 @@ const Profile = () => {
   };
 
   // Create collaboration project
-  const createCollaborationProject = async () => {
-    if (!projectTitle.trim()) {
-      Alert.alert('Error', 'Please enter a project title');
-      return;
-    }
-    if (!projectAbout.trim()) {
-      Alert.alert('Error', 'Please enter project description');
-      return;
-    }
-    if(selectedCollaborators.length==0){
-      Alert.alert('Error','Please select a user to collaborate')
-      return;
-    }
+  // Fixed createCollaborationProject function with proper authentication
 
-    setCreatingProject(true);
+const createCollaborationProject = async () => {
+  // CRITICAL: Ensure we have the current user and they're authenticated
+  const currentUser = auth().currentUser;
+  if (!currentUser) {
+    Alert.alert('Authentication Required', 'Please sign in to create a project');
+    return;
+  }
+
+  // Check GitHub connection status
+  const status = await getGitHubStatus(currentUser.uid);
+  if (!status.connected) {
+    Alert.alert('GitHub Required', 'Please connect your GitHub account to create a project');
+    return;
+  }
+
+  if (!projectTitle.trim()) {
+    Alert.alert('Error', 'Please enter a project title');
+    return;
+  }
+
+  if (!projectAbout.trim()) {
+    Alert.alert('Error', 'Please enter project description');
+    return;
+  }
+
+  if (!githubRepo.trim()) {
+    Alert.alert('Error', 'Please enter a GitHub repository URL');
+    return;
+  }
+
+  // Validate GitHub repo URL format
+  const repoMatch = githubRepo.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+  if (!repoMatch) {
+    Alert.alert('Error', 'Invalid GitHub repository URL. Format: https://github.com/owner/repo');
+    return;
+  }
+
+  if (selectedCollaborators.length === 0) {
+    Alert.alert('Error', 'Please select at least one collaborator');
+    return;
+  }
+
+  setCreatingProject(true);
+
+  try {
+    // CRITICAL FIX: Ensure authentication token is refreshed and valid
+    await currentUser.getIdToken(true); // Force token refresh
     
-
-try{
-
-  const projectRef = Firestore().collection('collaborations').doc();
-  const projectId=projectRef.id;
-
-     const groupchat=await chatService.createGroupChat(currentUser.uid,[],projectTitle.trim(),
-    `collaboration chat for:${projectAbout.trim()}`);
-
-     
-
-const projectData = {
-  id: projectId, // Include ID in the data
-  title: projectTitle.trim(),
-  about: projectAbout.trim(),
-  tech: projectTech.trim(),
-  githubRepo: githubRepo.trim(),
-  creatorId: currentUser.uid,
-  creatorUsername: displayName,
-  collaborators: [currentUser.uid],
-  pendingInvites:selectedCollaborators,
-  status: 'pending',
-  createdAt: Firestore.FieldValue.serverTimestamp(),
-  chatId:null
-};
- 
-      await projectRef.set(projectData)
-      await projectRef.update({
-      chatId:groupchat.id
-     })
-
-   
-
-      // Send notifications to selected collaborators
-      const notificationPromises = selectedCollaborators.map(async (userId) => {
-        await Firestore().collection('notifications').add({
-          recipientUid: userId,
-          senderUid: currentUser.uid,
-          type: 'collaboration_invite',
-          data: {
-            message: `invited you to collaborate on "${projectTitle}"`,
-            senderUsername: displayName,
-            projectId: projectId,
-            projectTitle: projectTitle.trim(),
-            chatId:groupchat.id
-          },
-          read: false,
-          createdAt: Firestore.FieldValue.serverTimestamp(),
-        });
-      });
-
-      await Promise.all(notificationPromises);
-
-      Alert.alert('Success', 'Collaboration project created and invitations sent!');
-      closeCollaborationModal();
-    } catch (error) {
+    // Call the Cloud Function with proper authentication
+    // The Firebase SDK will automatically attach the auth token
+    const validateRepo = functions().httpsCallable('validateGitHubRepo');
+    
+    let validation;
+    try {
+      validation = await validateRepo({ repoUrl: githubRepo.trim() });
+    } catch (functionError) {
+      console.error('Cloud Function Error:', functionError);
       
-      Alert.alert('Error', 'Failed to create collaboration project');
-    } finally {
+      // Better error handling
+      if (functionError.code === 'unauthenticated') {
+        Alert.alert(
+          'Authentication Error',
+          'Your session has expired. Please sign out and sign back in.'
+        );
+      } else if (functionError.code === 'failed-precondition') {
+        Alert.alert(
+          'GitHub Not Connected',
+          'Please connect your GitHub account in Settings first.'
+        );
+      } else if (functionError.code === 'not-found') {
+        Alert.alert(
+          'Repository Not Found',
+          'Could not find this repository or you do not have access to it.'
+        );
+      } else {
+        Alert.alert(
+          'Repository Validation Failed',
+          functionError.message || 'Unable to validate repository access. Please try again.'
+        );
+      }
       setCreatingProject(false);
+      return;
     }
-  };
 
+    if (!validation.data.hasAccess) {
+      Alert.alert(
+        'Repository Access Required',
+        'You need admin access to this repository to add collaborators. Please check your permissions.'
+      );
+      setCreatingProject(false);
+      return;
+    }
+
+    const projectRef = Firestore().collection('collaborations').doc();
+    const projectId = projectRef.id;
+
+    const groupchat = await chatService.createGroupChat(
+      currentUser.uid,
+      [],
+      projectTitle.trim(),
+      `Collaboration chat for: ${projectAbout.trim()}`
+    );
+
+    const projectData = {
+      id: projectId,
+      title: projectTitle.trim(),
+      about: projectAbout.trim(),
+      tech: projectTech.trim(),
+      githubRepo: githubRepo.trim(),
+      creatorId: currentUser.uid,
+      creatorUsername: displayName,
+      collaborators: [currentUser.uid],
+      pendingInvites: selectedCollaborators,
+      pendingGitHubAcceptance: [],
+      status: 'pending',
+      createdAt: Firestore.FieldValue.serverTimestamp(),
+      chatId: groupchat.id,
+    };
+
+    await projectRef.set(projectData);
+
+    // Send notifications to selected collaborators
+    const notificationPromises = selectedCollaborators.map(async (userId) => {
+      await Firestore().collection('notifications').add({
+        recipientUid: userId,
+        senderUid: currentUser.uid,
+        type: 'collaboration_invite',
+        data: {
+          message: `invited you to collaborate on "${projectTitle}"`,
+          senderUsername: displayName,
+          projectId: projectId,
+          projectTitle: projectTitle.trim(),
+          chatId: groupchat.id,
+        },
+        read: false,
+        createdAt: Firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    await Promise.all(notificationPromises);
+
+    Alert.alert(
+      'Success',
+      'Collaboration project created! Invitations have been sent to all collaborators.'
+    );
+    closeCollaborationModal();
+    fetchCollaborationProjects(); // Refresh the list
+  } catch (error) {
+    console.error('Error creating project:', error);
+    Alert.alert('Error', error.message || 'Failed to create collaboration project');
+  } finally {
+    setCreatingProject(false);
+  }
+};
 
   const fetchCollaborationProjects = async () => {
     if (!viewedUserId) return;
@@ -1501,6 +1580,59 @@ if(!haspermission){
                           </View>
                         )}
                       </View>
+                       <View style={styles.searchContainer}>
+                  <Icon name="search-outline" size={20} color="#666" style={styles.searchIcon} />
+                  <TextInput
+                    style={styles.searchInput}
+                    placeholder="Search users you follow..."
+                    placeholderTextColor="#666"
+                    value={searchQuery}
+                    onChangeText={handleSearchUsers}
+                  />
+                </View>
+                {loadingFollowing ? (
+                  <ActivityIndicator size="large" color="#007AFF" style={{ marginTop: 20 }} />
+                ) : filteredUsers.length === 0 ? (
+                  <View style={styles.emptyUserList}>
+                    <Icon name="people-outline" size={48} color="#666" />
+                    <Text style={styles.emptyUserText}>
+                      {followingUsers.length === 0 
+                        ? "You're not following anyone yet" 
+                        : "No users found"}
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.userList}>
+                    {filteredUsers.map((item) => (
+                      <TouchableOpacity
+                        key={item.id}
+                        style={styles.userItem}
+                        onPress={() => toggleCollaborator(item.id)}
+                      >
+                        <Image source={{ uri: item.avatar }} style={styles.userAvatar} />
+                        <View style={styles.userInfo}>
+                          <Text style={styles.userName}>{item.username}</Text>
+                          <Text style={styles.userEmail}>{item.email}</Text>
+                        </View>
+                        <View style={[
+                          styles.checkbox,
+                          selectedCollaborators.includes(item.id) && styles.checkboxSelected
+                        ]}>
+                          {selectedCollaborators.includes(item.id) && (
+                            <Icon name="checkmark" size={16} color="white" />
+                          )}
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+                {selectedCollaborators.length > 0 && (
+                  <View style={styles.selectedCount}>
+                    <Text style={styles.selectedCountText}>
+                      {selectedCollaborators.length} collaborator{selectedCollaborators.length > 1 ? 's' : ''} selected
+                    </Text>
+                  </View>
+                )}
 
                       <View style={styles.editProjectActions}>
                         <TouchableOpacity
@@ -2671,7 +2803,7 @@ roleTagParticipant: {
     marginBottom: 16,
   },
   participantsList: {
-    // gap property handled by marginBottom in participantItem
+    // gap property id by marginBottom in participantItem
   },
   participantItem: {
     flexDirection: 'row',

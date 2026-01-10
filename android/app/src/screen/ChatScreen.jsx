@@ -14,10 +14,13 @@ import {
   Keyboard,
 } from 'react-native';
 import { Image } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import firestore from '@react-native-firebase/firestore';
 import auth from '@react-native-firebase/auth';
 import EmptydP from './Emptydp';
 import chatService from './chatService';
+import presenceService from './presenceService';
+import Icon from 'react-native-vector-icons/Ionicons';
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0: 0;
 export default function ChatScreen({ route, navigation }) {
   const { 
@@ -42,11 +45,16 @@ export default function ChatScreen({ route, navigation }) {
   const [chatData, setChatData] = useState(null);
   const [isCreator, setIsCreator] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [onlineStatus, setOnlineStatus] = useState('Offline');
+  const statusUnsubscribeRef = useRef(null);
+  const [recipientId, setRecipientId] = useState(null);
 
   // Keep actualChatId in sync when navigation params change
   useEffect(() => {
     setActualChatId(chatId);
   }, [chatId]);
+
+  
 
   // Fetch chat data to check if it's a group chat and if user is creator
   useEffect(() => {
@@ -60,6 +68,21 @@ export default function ChatScreen({ route, navigation }) {
         if (chatDoc.exists) {
           const data = chatDoc.data();
           setChatData(data);
+          
+          // Get recipient ID for direct chats
+          if (data.type === 'direct' && data.participants) {
+            const otherParticipant = data.participants.find(id => id !== currentUserUid);
+            if (otherParticipant) {
+              setRecipientId(otherParticipant);
+            }
+          } else if (data.type === 'direct' && actualChatId.includes('_')) {
+            // Fallback: extract from chat ID
+            const participants = actualChatId.split('_').filter(id => id && id.length > 10);
+            const otherParticipant = participants.find(id => id !== currentUserUid);
+            if (otherParticipant) {
+              setRecipientId(otherParticipant);
+            }
+          }
           
           // Check if it's a group chat and if current user is the creator
           if (data.type === 'group' && data.createdBy === currentUserUid) {
@@ -105,6 +128,64 @@ export default function ChatScreen({ route, navigation }) {
     maybeFetchHeaderInfo();
   }, [userId, headerTitle]);
 
+  // Subscribe to online status for direct chats
+  useEffect(() => {
+    // Cleanup previous subscription
+    if (statusUnsubscribeRef.current) {
+      statusUnsubscribeRef.current();
+      statusUnsubscribeRef.current = null;
+    }
+
+    // Don't track status for message requests or temp chats
+    if (isRequestMode || !actualChatId || actualChatId.startsWith('temp_') || actualChatId.startsWith('request_')) {
+      setOnlineStatus('Offline');
+      return;
+    }
+
+    // For group chats, show "Group" status
+    if (chatData?.type === 'group') {
+      setOnlineStatus('Group');
+      return;
+    }
+
+    // For direct chats, find the other user's ID and subscribe to their status
+    if (chatData?.participants && chatData.participants.length === 2) {
+      const otherUserId = chatData.participants.find(id => id !== currentUserUid);
+      
+      if (otherUserId) {
+        // Subscribe to the other user's online status
+        const unsubscribe = presenceService.subscribeToUserStatus(
+          otherUserId,
+          (statusText) => {
+            setOnlineStatus(statusText);
+          }
+        );
+        statusUnsubscribeRef.current = unsubscribe;
+      } else {
+        setOnlineStatus('Offline');
+      }
+    } else if (userId) {
+      // Fallback: use userId from route params if available
+      const unsubscribe = presenceService.subscribeToUserStatus(
+        userId,
+        (statusText) => {
+          setOnlineStatus(statusText);
+        }
+      );
+      statusUnsubscribeRef.current = unsubscribe;
+    } else {
+      setOnlineStatus('Offline');
+    }
+
+    // Cleanup on unmount or when dependencies change
+    return () => {
+      if (statusUnsubscribeRef.current) {
+        statusUnsubscribeRef.current();
+        statusUnsubscribeRef.current = null;
+      }
+    };
+  }, [actualChatId, chatData, userId, currentUserUid, isRequestMode]);
+
   useEffect(() => {
     // Set the header
     <View style={styles.statusBarSpacer} />,
@@ -124,86 +205,32 @@ export default function ChatScreen({ route, navigation }) {
           )}
         </View>
       ),
-      headerRight: !isRequestMode && actualChatId && !actualChatId.startsWith('temp_') && !actualChatId.startsWith('request_')
+       headerRight: !isRequestMode && actualChatId && !actualChatId.startsWith('temp_') && !actualChatId.startsWith('request_')
         ? () => (
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              {isCreator && chatData?.type === 'group' && (
-                <TouchableOpacity
-                  onPress={async () => {
-                    Alert.alert(
-                      'Mark Project as Completed',
-                      'Are you sure you want to mark this project as completed?',
-                      [
-                        { text: 'Cancel', style: 'cancel' },
-                        {
-                          text: 'Done',
-                          onPress: async () => {
-                            try {
-                              // Find the project associated with this chatId
-                              const projectsSnapshot = await firestore()
-                                .collection('collaborations')
-                                .where('chatId', '==', actualChatId)
-                                .get();
-                              
-                              if (!projectsSnapshot.empty) {
-                                const projectDoc = projectsSnapshot.docs[0];
-                                await projectDoc.ref.update({
-                                  status: 'completed',
-                                  completedAt: firestore.FieldValue.serverTimestamp()
-                                });
-                                
-                                Alert.alert('Success', 'Project marked as completed!');
-                                setIsCreator(false); // Hide the button after completion
-                              } else {
-                                Alert.alert('Error', 'Project not found for this chat.');
-                              }
-                            } catch (e) {
-                              Alert.alert('Error', 'Failed to mark project as completed.');
-                            }
-                          }
-                        }
-                      ]
-                    );
+           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <TouchableOpacity
+                  onPress={() => {
+                    navigation.navigate('Chatinfo', {
+                      chatId: actualChatId,
+                       chatType: chatData?.type,  
+                      // isGroup: chatData?.type === 'group',
+                      chatTitle: headerTitle ?? title,
+                      chatData: chatData || null,
+                    });
                   }}
                   style={{ paddingHorizontal: 12, marginRight: 8 }}
                 >
-                  <Text style={{ color: '#4e9bde', fontWeight: 'bold' }}>Done</Text>
-                </TouchableOpacity>
-              )}
-              <TouchableOpacity
-                onPress={() => {
-                  Alert.alert(
-                    'Delete Chat',
-                    'This will delete the conversation for all participants. This action cannot be undone.',
-                    [
-                      { text: 'Cancel', style: 'cancel' },
-                      {
-                        text: 'Delete',
-                        style: 'destructive',
-                        onPress: async () => {
-                          try {
-                            await chatService.deleteChatPermanently(actualChatId);
-                            navigation.goBack();
-                          } catch (e) {
-                            Alert.alert('Error', 'Failed to delete chat. Please try again.');
-                          }
-                        }
-                      }
-                    ]
-                  );
-                }}
-                style={{ paddingHorizontal: 12 }}
-              >
-                <Text style={{ color: 'white', fontWeight: 'bold' }}>Delete</Text>
-              </TouchableOpacity>
-            </View>
-          )
+                  <Text style={{ color: '#4e9bde', fontWeight: 'bold' }}>Info</Text>
+                    </TouchableOpacity>
+                    </View>
+                    )
         : undefined,
+
       headerTitle: () => (
         <View style={styles.headerTitle}>
           <Text style={[styles.headerTitleText, { color: 'white' }]}>{headerTitle || 'Chat'}</Text>
           <Text style={[styles.headerSubtitle, { color: 'white' }]}>
-            {isRequestMode ? 'Message Request' : 'Online'}
+            {isRequestMode ? 'Message Request' : onlineStatus}
           </Text>
         </View>
       ),
@@ -225,7 +252,7 @@ export default function ChatScreen({ route, navigation }) {
     return () => {
       // Cleanup will be handled by individual functions
     };
-  }, [chatId, headerTitle, headerAvatar, navigation, isMessageRequest, isRequestMode, isCreator, chatData, actualChatId]);
+  }, [chatId, headerTitle, headerAvatar, navigation, isMessageRequest, isRequestMode, isCreator, chatData, actualChatId, onlineStatus]);
 
   // If we still don't have header info but we do have recipientInfo from navigation, use it immediately
   useEffect(() => {
@@ -299,16 +326,71 @@ export default function ChatScreen({ route, navigation }) {
       .doc(actualChatId)
       .collection('messages')
       .orderBy('createdAt', 'desc')
-      .onSnapshot(snapshot => {
+      .onSnapshot(async snapshot => {
         const msgs = snapshot.docs.map(doc => ({
           id: doc.id,
           ...doc.data(),
         }));
         setMessages(msgs);
+
+        // Mark messages as delivered when received (for messages sent by others)
+        // This happens when:
+        // 1. Recipient is logged in and opens the chat screen (current behavior)
+        // 2. OR when recipient comes online (if we track presence)
+        const batch = firestore().batch();
+        let hasUpdates = false;
+
+        snapshot.docs.forEach(doc => {
+          const messageData = doc.data();
+          // Only mark as delivered if message is from someone else and not already delivered
+          if (messageData.senderId !== currentUserUid) {
+            const deliveredTo = messageData.deliveredTo || {};
+            if (!deliveredTo[currentUserUid]) {
+              batch.update(doc.ref, {
+                [`deliveredTo.${currentUserUid}`]: firestore.FieldValue.serverTimestamp()
+              });
+              hasUpdates = true;
+            }
+          }
+        });
+
+        if (hasUpdates) {
+          try {
+            await batch.commit();
+          } catch (error) {
+            console.error('Error marking messages as delivered:', error);
+          }
+        }
+
+        // Mark messages as read when chat is viewed
+        markMessagesAsRead();
       });
 
     return () => unsubscribe();
   };
+
+  // Mark messages as read
+  const markMessagesAsRead = async () => {
+    if (!actualChatId || actualChatId.startsWith('temp_') || actualChatId.startsWith('request_')) {
+      return;
+    }
+
+    try {
+      await chatService.markMessagesAsRead(actualChatId, currentUserUid);
+    } catch (error) {
+      console.error('Error marking messages as read:', error);
+    }
+  };
+
+  // Mark messages as read when chat screen is focused
+  useFocusEffect(
+    React.useCallback(() => {
+      // Mark messages as read when screen is focused
+      if (actualChatId && !actualChatId.startsWith('temp_') && !actualChatId.startsWith('request_')) {
+        markMessagesAsRead();
+      }
+    }, [actualChatId, currentUserUid])
+  );
 
   const sendMessageRequest = async () => {
     if (!input.trim() || !recipientInfo) return;
@@ -341,17 +423,9 @@ export default function ChatScreen({ route, navigation }) {
       return;
     }
 
-    const newMessage = {
-      text: input.trim(),
-      senderId: currentUserUid,
-      createdAt: firestore.FieldValue.serverTimestamp(),
-    };
-
-    await firestore()
-      .collection('chats')
-      .doc(actualChatId)
-      .collection('messages')
-      .add(newMessage);
+    try {
+      // Use chatService to send message (which handles readBy properly)
+      await chatService.sendMessage(actualChatId, currentUserUid, input.trim());
 
     setInput('');
 
@@ -359,18 +433,10 @@ export default function ChatScreen({ route, navigation }) {
     setTimeout(() => {
       flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
     }, 100);
-
-    // Also update chat metadata (for chat list preview)
-    await firestore()
-      .collection('chats')
-      .doc(actualChatId)
-      .set(
-        {
-          lastMessage: newMessage.text,
-          lastMessageTime: firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
+    } catch (error) {
+      console.error('Error sending message:', error);
+      Alert.alert('Error', 'Failed to send message');
+    }
   };
 
   const handleAcceptRequest = async () => {
@@ -378,22 +444,16 @@ export default function ChatScreen({ route, navigation }) {
       if (!requestData) return;
 
       // Accept the message request using chatService
-      const chatResult = await chatService.acceptMessageRequest(requestData.id, currentUserUid);
+      await chatService.acceptMessageRequest(requestData.id, currentUserUid);
 
       Alert.alert(
         'Request Accepted',
-        'You can now chat with this person.',
+        'You can now chat with this person. The chat has been added to your conversations.',
         [{
-          text: 'Continue Chatting',
+          text: 'OK',
           onPress: () => {
-            // Navigate to the new chat with the actual chat ID
-            navigation.navigate('ChatScreen', {
-              chatId: chatResult.id,
-              title: requestData.senderInfo?.name || requestData.senderInfo?.displayName || 'Unknown User',
-              avatar: requestData.senderInfo?.avatar || '',
-              userId: requestData.senderId,
-              isMessageRequest: false
-            });
+            // Just go back - chat will appear in First.jsx automatically
+            navigation.goBack();
           }
         }]
       );
@@ -432,12 +492,100 @@ export default function ChatScreen({ route, navigation }) {
     );
   };
 
-  const renderItem = ({ item }) => (
+  // Get message status for read receipts
+  const getMessageStatus = (message) => {
+    // Only show ticks for messages sent by current user
+    if (message.senderId !== currentUserUid || message.isRequestMessage) {
+      return null;
+    }
+
+    // Get recipient ID (use recipientId from state, or userId from route params, or extract from chat)
+    const targetRecipientId = recipientId || userId;
     
+    // If we still don't have recipient ID, try to extract from chat data
+    if (!targetRecipientId && chatData?.participants) {
+      const otherParticipant = chatData.participants.find(id => id !== currentUserUid);
+      if (otherParticipant) {
+        // Use the found participant ID for this check
+        const readBy = message.readBy || {};
+        const deliveredTo = message.deliveredTo || {};
+        
+        if (readBy[otherParticipant]) {
+          return 'seen';
+        }
+        if (deliveredTo[otherParticipant]) {
+          return 'delivered';
+        }
+        return 'sent';
+      }
+    }
+
+    // If recipientId is not set yet, still show sent status
+    if (!targetRecipientId) {
+      return 'sent'; // Show single tick while loading
+    }
+
+    const readBy = message.readBy || {};
+    const deliveredTo = message.deliveredTo || {};
+    
+    // Check if message is read by recipient
+    if (readBy[targetRecipientId]) {
+      return 'seen'; // Double tick filled (orange)
+    }
+    
+    // Check if message is delivered to recipient
+    if (deliveredTo[targetRecipientId]) {
+      return 'delivered'; // Double tick (orange outline)
+    }
+    
+    // Message is sent but not delivered yet
+    return 'sent'; // Single tick (orange outline)
+  };
+
+  // Render tick icon based on status
+  const renderTicks = (status) => {
+    if (!status) return null;
+
+    // Use a darker color that's visible on orange background
+    const tickColor = 'rgba(0, 0, 0, 0.7)'; // Semi-transparent black for better visibility
+    
+    try {
+      if (status === 'seen') {
+        // Double tick filled - message has been read
+        return (
+          <Icon name="checkmark-done" size={14} color={tickColor} style={styles.tickIcon} />
+        );
+      } else if (status === 'delivered') {
+        // Double tick outline - message delivered but not read
+        return (
+          <Icon name="checkmark-done-outline" size={14} color={tickColor} style={styles.tickIcon} />
+        );
+      } else {
+        // Single tick - sent but not delivered
+        return (
+          <Icon name="checkmark-outline" size={14} color={tickColor} style={styles.tickIcon} />
+        );
+      }
+    } catch (error) {
+      console.error('Error rendering ticks:', error);
+      // Fallback: show simple text indicator
+      return (
+        <Text style={styles.tickText}>
+          {status === 'seen' ? '✓✓' : status === 'delivered' ? '✓✓' : '✓'}
+        </Text>
+      );
+    }
+  };
+
+  const renderItem = ({ item }) => {
+    const messageStatus = getMessageStatus(item);
+    const isUserMessage = item.senderId === currentUserUid;
+    
+    return (
     <View
       style={[
         styles.messageContainer,
-        item.senderId === currentUserUid ? styles.userMessage : styles.botMessage,
+          isUserMessage ? styles.userMessage : styles.botMessage,
         item.isRequestMessage && styles.requestMessage
       ]}
     >
@@ -447,6 +595,7 @@ export default function ChatScreen({ route, navigation }) {
       ]}>
         {item.text}
       </Text>
+        <View style={styles.messageFooter}>
       <Text style={styles.messageTime}>
         {item.createdAt?.toDate
           ? item.createdAt.toDate().toLocaleTimeString([], {
@@ -455,8 +604,11 @@ export default function ChatScreen({ route, navigation }) {
             })
           : ''}
       </Text>
+          {isUserMessage && messageStatus ? renderTicks(messageStatus) : null}
+        </View>
     </View>
   );
+  };
 
   const renderAcceptRejectButtons = () => {
     if (!showAcceptReject) return null;
@@ -480,11 +632,12 @@ export default function ChatScreen({ route, navigation }) {
   };
 
   return (
-    // Platform.OS === 'ios' ? (
-      <KeyboardAvoidingView
+   
+      <KeyboardAvoidingView 
         style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={100}
+        behavior={Platform.OS === 'ios' ? undefined : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 100}
+        
       >
         <SafeAreaView style={styles.safeArea}>
           <FlatList
@@ -503,7 +656,7 @@ export default function ChatScreen({ route, navigation }) {
             }}
           />
           {renderAcceptRejectButtons()}
-        </SafeAreaView>
+       
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.input}
@@ -539,67 +692,10 @@ export default function ChatScreen({ route, navigation }) {
             </Text>
           </TouchableOpacity>
         </View>
+         </SafeAreaView>
       </KeyboardAvoidingView>
   )}
-//     ) }: (
-//       <View style={styles.container}>
-//         <SafeAreaView style={styles.safeArea}>
-//           <FlatList
-//             ref={flatListRef}
-//             data={messages}
-//             keyExtractor={(item) => item.id}
-//             renderItem={renderItem}
-//             inverted={!showAcceptReject}
-//             contentContainerStyle={styles.messagesList}
-//             showsVerticalScrollIndicator={false}
-//             keyboardShouldPersistTaps="handled"
-//             onContentSizeChange={() => {
-//               if (!showAcceptReject) {
-//                 flatListRef.current?.scrollToOffset({ offset: 0, animated: false });
-//               }
-//             }}
-//           />
-//           {renderAcceptRejectButtons()}
-//         </SafeAreaView>
-//         <View style={[styles.inputContainer, { paddingBottom: keyboardHeight > 0 ? keyboardHeight  : 10 }]}>
-//           <TextInput
-//             style={styles.input}
-//             value={input}
-//             onChangeText={setInput}
-//             placeholder={
-//               isRequestMode && actualChatId.startsWith('temp_request_')
-//                 ? "Write a message request..."
-//                 : "Type your message..."
-//             }
-//             placeholderTextColor="#aaa"
-//             multiline
-//             maxLength={500}
-//             editable={!showAcceptReject}
-//             onFocus={() => {
-//               setTimeout(() => {
-//                 if (!showAcceptReject) {
-//                   flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
-//                 }
-//               }, 100);
-//             }}
-//           />
-//           <TouchableOpacity
-//             onPress={sendMessage}
-//             style={[
-//               styles.sendButton, 
-//               { opacity: input.trim() && !showAcceptReject ? 1 : 0.5 }
-//             ]}
-//             disabled={!input.trim() || showAcceptReject}
-//           >
-//             <Text style={styles.sendButtonText}>
-//               {isRequestMode && actualChatId.startsWith('temp_request_') ? 'Send Request' : 'Send'}
-//             </Text>
-//           </TouchableOpacity>
-//         </View>
-//       </View>
-//     )
-//   );
-// }
+
 
 const styles = StyleSheet.create({
   container: {
@@ -670,7 +766,7 @@ const styles = StyleSheet.create({
   },
   userMessage: {
     alignSelf: 'flex-end',
-    backgroundColor: '#000',
+    backgroundColor: '#FF6D1F',
     borderBottomRightRadius: 4,
   },
   botMessage: {
@@ -696,7 +792,27 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.7)',
     fontSize: 11,
     marginTop: 4,
-    alignSelf: 'flex-end',
+  },
+  messageFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    marginTop: 4,
+    gap: 4,
+  },
+  tickContainer: {
+    marginLeft: 4,
+  },
+  tickIcon: {
+    marginLeft: 3,
+    opacity: 0.85,
+  },
+  tickText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.75)',
+    marginLeft: 3,
+    opacity: 0.85,
   },
   acceptRejectContainer: {
     flexDirection: 'row',
@@ -756,6 +872,18 @@ const styles = StyleSheet.create({
     minHeight: 44,
     textAlignVertical: 'center',
   },
+  infoButton: {
+paddingHorizontal: 10,
+paddingVertical: 6,
+marginRight: 6,
+borderRadius: 18,
+backgroundColor: 'transparent',
+},
+infoButtonText: {
+color: 'white',
+fontSize: 16,
+fontWeight: '600',
+},
   sendButton: {
     marginLeft: 10,
     backgroundColor: '#1e1e1e',

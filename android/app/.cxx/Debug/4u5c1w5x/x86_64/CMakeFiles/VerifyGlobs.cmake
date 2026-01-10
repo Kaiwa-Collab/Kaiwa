@@ -112,6 +112,55 @@ if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")
   file(TOUCH_NOCREATE "D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/x86_64/CMakeFiles/cmake.verify_globs")
 endif()
 
+# LIB_CUSTOM_SRCS at D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/CMakeLists.txt:23 (file)
+file(GLOB NEW_GLOB LIST_DIRECTORIES true "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/*.cpp")
+set(OLD_GLOB
+  )
+if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")
+  message("-- GLOB mismatch!")
+  file(TOUCH_NOCREATE "D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/x86_64/CMakeFiles/cmake.verify_globs")
+endif()
+
+# LIB_CUSTOM_SRCS at D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/CMakeLists.txt:23 (file)
+file(GLOB NEW_GLOB LIST_DIRECTORIES true "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../../common/cpp/react/renderer/components/keyboardcontroller/*.cpp")
+set(OLD_GLOB
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../../common/cpp/react/renderer/components/keyboardcontroller/RNKCKeyboardBackgroundViewShadowNode.cpp"
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../../common/cpp/react/renderer/components/keyboardcontroller/RNKCKeyboardControllerViewShadowNode.cpp"
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../../common/cpp/react/renderer/components/keyboardcontroller/RNKCKeyboardExtenderShadowNode.cpp"
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../../common/cpp/react/renderer/components/keyboardcontroller/RNKCKeyboardGestureAreaShadowNode.cpp"
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../../common/cpp/react/renderer/components/keyboardcontroller/RNKCOverKeyboardViewShadowNode.cpp"
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../../common/cpp/react/renderer/components/keyboardcontroller/RNKCOverKeyboardViewState.cpp"
+  )
+if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")
+  message("-- GLOB mismatch!")
+  file(TOUCH_NOCREATE "D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/x86_64/CMakeFiles/cmake.verify_globs")
+endif()
+
+# LIB_CODEGEN_SRCS at D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/CMakeLists.txt:24 (file)
+file(GLOB NEW_GLOB LIST_DIRECTORIES true "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../build/generated/source/codegen/jni/*.cpp")
+set(OLD_GLOB
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../build/generated/source/codegen/jni/keyboardcontroller-generated.cpp"
+  )
+if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")
+  message("-- GLOB mismatch!")
+  file(TOUCH_NOCREATE "D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/x86_64/CMakeFiles/cmake.verify_globs")
+endif()
+
+# LIB_CODEGEN_SRCS at D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/CMakeLists.txt:24 (file)
+file(GLOB NEW_GLOB LIST_DIRECTORIES true "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../build/generated/source/codegen/jni/react/renderer/components/keyboardcontroller/*.cpp")
+set(OLD_GLOB
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../build/generated/source/codegen/jni/react/renderer/components/keyboardcontroller/ComponentDescriptors.cpp"
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../build/generated/source/codegen/jni/react/renderer/components/keyboardcontroller/EventEmitters.cpp"
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../build/generated/source/codegen/jni/react/renderer/components/keyboardcontroller/Props.cpp"
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../build/generated/source/codegen/jni/react/renderer/components/keyboardcontroller/ShadowNodes.cpp"
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../build/generated/source/codegen/jni/react/renderer/components/keyboardcontroller/States.cpp"
+  "D:/vcprojects/DevLink/node_modules/react-native-keyboard-controller/android/src/main/jni/../../../build/generated/source/codegen/jni/react/renderer/components/keyboardcontroller/keyboardcontrollerJSI-generated.cpp"
+  )
+if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")
+  message("-- GLOB mismatch!")
+  file(TOUCH_NOCREATE "D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/x86_64/CMakeFiles/cmake.verify_globs")
+endif()
+
 # react_codegen_SRCS at D:/vcprojects/DevLink/node_modules/react-native-permissions/android/build/generated/source/codegen/jni/CMakeLists.txt:9 (file)
 file(GLOB NEW_GLOB LIST_DIRECTORIES true "D:/vcprojects/DevLink/node_modules/react-native-permissions/android/build/generated/source/codegen/jni/*.cpp")
 set(OLD_GLOB

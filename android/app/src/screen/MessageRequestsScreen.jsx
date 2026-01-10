@@ -90,37 +90,19 @@ const unsubscribeReceived = chatService.subscribeToMessageRequests(
       return;
     }
 
-    
-    
     setLoading(true);
-    const chatData = await chatService.acceptMessageRequest(request.id, currentUser.uid);
+    await chatService.acceptMessageRequest(request.id, currentUser.uid);
     
-    // Ensure participants and navigate directly to chat with request message visible
-    const otherUserId = request.senderId;
-    await chatService.ensureChatParticipants(chatData.id, currentUser.uid, otherUserId);
-
-    // Prefer using request.senderInfo for immediate DP/name
-    const displayName = request.senderInfo?.name || request.senderInfo?.displayName || 'Unknown User';
-    const avatar = request.senderInfo?.avatar || '';
-
-    const parentNav = typeof navigation.getParent === 'function' ? navigation.getParent() : null;
-    const nav = parentNav || navigation;
-    nav.navigate('ChatScreen', {
-      chatId: chatData.id,
-      title: displayName || 'Chat',
-      avatar: avatar || '',
-      userId: otherUserId,
-      isMessageRequest: false,
-      recipientInfo: {
-        id: otherUserId,
-        name: displayName || 'Unknown User',
-        avatar: avatar || '',
-        username: request.senderInfo?.username || ''
-      }
-    });
+    // Chat will automatically appear in First.jsx - no need to navigate
+    Alert.alert(
+      'Request Accepted',
+      'You can now chat with this person. The chat has been added to your conversations.',
+      [{ text: 'OK' }]
+    );
+    
+    setLoading(false);
   } catch (error) {
-    
-    
+    setLoading(false);
     // More specific error messages
     let errorMessage = 'Failed to accept request. Please try again.';
     if (error.code === 'firestore/not-found') {

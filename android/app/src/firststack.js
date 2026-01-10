@@ -4,6 +4,7 @@ import First from './screen/First';
 import MessageRequestsScreen from './screen/MessageRequestsScreen';
 import ChatScreen from './screen/ChatScreen';
 import ConversationsScreen from './screen/ConversationsScreen';
+import Chatinfo from './secondary_screens/Chatinfo';
 
 
 
@@ -56,30 +57,11 @@ export default function firstStack() {
                     },
                   },
                 },
-                // Alternative animation options (uncomment to use):
-                // Fade + Scale animation:
-                // cardStyleInterpolator: ({ current, next, layouts }) => {
-                //   return {
-                //     cardStyle: {
-                //       opacity: current.progress.interpolate({
-                //         inputRange: [0, 1],
-                //         outputRange: [0, 1],
-                //       }),
-                //       transform: [
-                //         {
-                //           scale: current.progress.interpolate({
-                //             inputRange: [0, 1],
-                //             outputRange: [0.9, 1],
-                //           }),
-                //         },
-                //       ],
-                //     },
-                //   };
-                // },
-                // Modal slide up animation:
-                // cardStyleInterpolator: CardStyleInterpolators.forModalPresentationIOS,
+                
               }}
             />
+            <Stack.Screen
+            name="Chatinfo" component={Chatinfo}/>
       
     </Stack.Navigator>
   );

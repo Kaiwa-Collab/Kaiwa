@@ -18,6 +18,8 @@ import firestore from '@react-native-firebase/firestore';
 import auth from '@react-native-firebase/auth';
 import { useNavigation } from '@react-navigation/native';
 import chatService from './chatService';
+import functions from '@react-native-firebase/functions';
+import { getGitHubStatus } from '../../service/getGitHubStatus';
 
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 
@@ -236,30 +238,41 @@ const Notifications = () => {
 const acceptCollaborationInvite = async (notification) => {
   try {
     const { projectId, chatId } = notification.data;
-    
-    // Verify chat exists
+
+    // Step 1: Check if user has GitHub connected
+    const status = await getGitHubStatus(currentUserUid);
+
+    if (!status.connected) {
+      Alert.alert(
+        'GitHub Connection Required',
+        'You need to connect your GitHub account to join this collaboration.\n\nSteps:\n1. Connect GitHub account\n2. Accept GitHub repository invitation (via email)\n\nLet\'s start with Step 1:',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Connect GitHub',
+            onPress: () => {
+              setShowCollaborationDetails(false);
+              navigation.navigate('Settings'); // Navigate to GitHub connection
+            },
+          },
+        ]
+      );
+      return;
+    }
+
+    // Step 2: Verify chat exists
     const chatRef = firestore().collection('chats').doc(chatId);
     const chatDoc = await chatRef.get();
-    
+
     if (!chatDoc.exists) {
       Alert.alert('Error', 'Chat not found. Please contact the project creator.');
       return;
     }
 
-    // Get user info
-    const userDoc = await firestore().collection('profile').doc(currentUserUid).get();
-    
-    if (!userDoc.exists) {
-      Alert.alert('Error', 'User profile not found.');
-      return;
-    }
-
-    const userData = userDoc.data();
-
-    // Get project data first
+    // Step 3: Get project data
     const projectRef = firestore().collection('collaborations').doc(projectId);
     const projectDoc = await projectRef.get();
-    
+
     if (!projectDoc.exists) {
       Alert.alert('Error', 'Project not found.');
       return;
@@ -267,72 +280,143 @@ const acceptCollaborationInvite = async (notification) => {
 
     const projectData = projectDoc.data();
 
-    // Update collaboration project 
+    // Step 4: Get user info
+    const userDoc = await firestore().collection('users').doc(currentUserUid).get();
+    const profileDoc = await firestore().collection('profile').doc(currentUserUid).get();
+
+    if (!userDoc.exists) {
+      Alert.alert('Error', 'User profile not found.');
+      return;
+    }
+
+    const userData = userDoc.data();
+    const profileData = profileDoc.exists ? profileDoc.data() : {};
+
+    // Step 5: Call Cloud Function to add user to GitHub repo
+    Alert.alert('Processing', 'Adding you to the GitHub repository...');
+
+    const addCollaborator = functions().httpsCallable('addGitHubCollaborator');
+    const result = await addCollaborator({
+      projectId: projectId,
+      githubUsername: status.username,
+    });
+
+    if (!result.data.success) {
+      throw new Error('Failed to add to GitHub repository');
+    }
+
+    // Step 6: Update project in Firestore
     await projectRef.update({
       collaborators: firestore.FieldValue.arrayUnion(currentUserUid),
-      pendingInvites: firestore.FieldValue.arrayRemove(currentUserUid)
+      pendingInvites: firestore.FieldValue.arrayRemove(currentUserUid),
+      pendingGitHubAcceptance: firestore.FieldValue.arrayUnion(currentUserUid),
     });
-     
-    // Check if all pending invites have been resolved
+
+    // Step 7: Add user to group chat
+    await chatRef.update({
+      participants: firestore.FieldValue.arrayUnion(currentUserUid),
+      [`participantsInfo.${currentUserUid}`]: {
+        id: currentUserUid,
+        name: userData.username || 'User',
+        avatar: profileData.avatar || null,
+        username: userData.username,
+        role: 'member',
+        joinedAt: firestore.FieldValue.serverTimestamp(),
+      },
+      updatedAt: firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Step 8: Delete the notification
+    await deleteNotification(notification.id);
+
+    // Step 9: Notify project creator
+    const creatorId = projectData.creatorId;
+    await createNotification(creatorId, 'collaboration_accepted', {
+      message: `@${status.username} has joined your project "${projectData.title}"`,
+      senderUsername: userData.username || 'User',
+      projectId: projectId,
+      projectTitle: projectData.title,
+      chatId: chatId,
+    });
+
+    // Step 10: Check if all invites have been accepted
     const updatedPendingInvites = (projectData.pendingInvites || []).filter(
       uid => uid !== currentUserUid
     );
 
-    // Add user to group chat
-    await chatRef.update({
-      participants: firestore.FieldValue.arrayUnion(currentUserUid),
-      name: notification.data.projectTitle,
-      [`participantsInfo.${currentUserUid}`]: {
-        id: currentUserUid,
-        name: userData.name || userData.displayName || userData.username,
-        avatar: userData.avatar || userData.photoURL || null,
-        username: userData.username,
-        role: 'member',
-        joinedAt: firestore.FieldValue.serverTimestamp()
-      },
-      updatedAt: firestore.FieldValue.serverTimestamp()
-    });
-
-    // Delete the notification
-    await deleteNotification(notification.id);
-
-    // Create acceptance notification for project creator
-    const creatorId = projectData.creatorId;
-    await createNotification(creatorId, 'collaboration_accepted', {
-      message: `accepted your collaboration invite for "${notification.data.projectTitle}"`,
-      senderUsername: userData.username || 'User',
-      projectId: projectId,
-      projectTitle: notification.data.projectTitle,
-      chatId: chatId // Include chatId here
-    });
-
-    // If all invites have been accepted, update status and notify all collaborators
     if (updatedPendingInvites.length === 0) {
+      // All collaborators have accepted in the app
       await projectRef.update({
-        status: 'accepted',
+        status: 'active',
       });
 
-      // Notify all collaborators that the project is now active
+      // Notify all collaborators
       const allCollaborators = [...(projectData.collaborators || []), currentUserUid];
-      
+
       for (const collaboratorId of allCollaborators) {
-        // Don't send notification to the current user
         if (collaboratorId !== currentUserUid) {
           await createNotification(collaboratorId, 'collaboration_active', {
             message: `The collaboration "${projectData.title}" is now active! All members have joined.`,
             projectId: projectId,
             projectTitle: projectData.title,
-            chatId: chatId // Include chatId for direct navigation
+            chatId: chatId,
           });
         }
       }
     }
 
     setShowCollaborationDetails(false);
-    Alert.alert('Success', 'You have joined the collaboration!');
+
+    Alert.alert(
+      '✅ Almost There!',
+      `You've joined the project chat!\n\n📧 Next Step: Check your email from GitHub and accept the repository invitation to start coding.\n\nRepo: ${projectData.githubRepo}`,
+      [
+        {
+          text: 'Check Email Now',
+          onPress: () => {
+            const { Linking } = require('react-native');
+            Linking.openURL('https://github.com/notifications');
+          },
+        },
+        {
+          text: 'OK',
+          onPress: () => {
+            // Navigate to chat
+            navigation.navigate('ChatScreen', {
+              chatId: chatId,
+              title: projectData.title,
+              isGroupChat: true,
+              groupChatData: {
+                name: projectData.title,
+                participants: chatDoc.data().participants || [],
+                participantsInfo: chatDoc.data().participantsInfo || {},
+              },
+            });
+          },
+        },
+      ]
+    );
   } catch (error) {
-    
-    Alert.alert('Error', `Failed to accept collaboration invite: ${error.message}`);
+    console.error('Error accepting collaboration:', error);
+
+    if (error.code === 'functions/already-exists') {
+      Alert.alert(
+        '❌ Account Already Connected',
+        error.message + '\n\nPlease:\n1. Logout from GitHub in your browser\n2. Connect with a different GitHub account\n\nOr contact the other user to disconnect first.',
+        [
+          {
+            text: 'Logout from GitHub',
+            onPress: () => {
+              const { Linking } = require('react-native');
+              Linking.openURL('https://github.com/logout');
+            },
+          },
+          { text: 'OK', style: 'cancel' },
+        ]
+      );
+    } else {
+      Alert.alert('Error', `Failed to accept collaboration: ${error.message}`);
+    }
   }
 };
   // Reject collaboration invite

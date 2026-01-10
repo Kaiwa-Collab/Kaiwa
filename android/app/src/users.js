@@ -429,10 +429,14 @@ export const UserProvider = ({ children }) => {
   // Effect to fetch following users data when currentUser changes
   useEffect(() => {
     if (!currentUser) {
-      setFollowingUsers([]);
-      setFollowingIds([]);
-      return;
-    }
+        setFollowingQuestions([]);
+    setFollowingPosts([]);
+    setFollowingUsers([]);
+    setLoading(false);
+    return;
+  }
+
+  
 
     const initFollowingUsers = async () => {
       await fetchFollowingUsersData(true);
@@ -440,6 +444,8 @@ export const UserProvider = ({ children }) => {
 
     initFollowingUsers();
   }, [currentUser]);
+
+  
 
   useEffect(() => {
     if (!currentUser) {
@@ -633,21 +639,28 @@ export const UserProvider = ({ children }) => {
 
         // Updated profile listener to use modular API
         const profileDocRef = doc(db, 'profile', user.uid);
+        let lastProfileHash = null; // Track last profile to prevent redundant updates
         unsubscribeProfile = onSnapshot(
           profileDocRef,
           doc => {
             console.log('Profile snapshot received:', doc.exists());
             if (doc.exists()) {
               const profileData = doc.data();
-              console.log('Profile data:', profileData?.username);
-              setProfile(profileData);
-              
-              if (profileData.avatar) {
-                cacheImage(profileData.avatar);
+              // Only update state if profile actually changed (prevents unnecessary re-renders)
+              const profileHash = JSON.stringify(profileData);
+              if (profileHash !== lastProfileHash) {
+                lastProfileHash = profileHash;
+                console.log('Profile data:', profileData?.username);
+                setProfile(profileData);
+                
+                if (profileData.avatar) {
+                  cacheImage(profileData.avatar);
+                }
               }
             } else {
               console.log('Profile document does not exist');
               setProfile(null);
+              lastProfileHash = null;
             }
             setLoading(false);
           },

@@ -140,76 +140,76 @@ async checkMutualFollow(userId1, userId2) {
   // Accept message request and create chat
  // Updated acceptMessageRequest function in chatService.js
 // Minimal acceptMessageRequest function - Just accept the request, don't send initial message
-async acceptMessageRequest(requestId, recipientId) {
-  try {
+// async acceptMessageRequest(requestId, recipientId) {
+//   try {
  
     
-    // Step 1: Get and validate request
-    const requestRef = this.db.collection('messageRequests').doc(requestId);
-    const requestDoc = await requestRef.get();
+//     // Step 1: Get and validate request
+//     const requestRef = this.db.collection('messageRequests').doc(requestId);
+//     const requestDoc = await requestRef.get();
 
-    if (!requestDoc.exists) {
-      throw new Error('Message request not found');
-    }
+//     if (!requestDoc.exists) {
+//       throw new Error('Message request not found');
+//     }
 
-    const requestData = requestDoc.data();
+//     const requestData = requestDoc.data();
     
 
-    if (requestData.recipientId !== recipientId) {
-      throw new Error('Unauthorized to accept this request');
-    }
+//     if (requestData.recipientId !== recipientId) {
+//       throw new Error('Unauthorized to accept this request');
+//     }
 
-    if (requestData.status !== 'pending') {
-      throw new Error(`Request has already been ${requestData.status}`);
-    }
+//     if (requestData.status !== 'pending') {
+//       throw new Error(`Request has already been ${requestData.status}`);
+//     }
 
-    // Step 2: Generate chat ID
-    const chatId = this.generateDirectChatId(requestData.senderId, recipientId);
+//     // Step 2: Generate chat ID
+//     const chatId = this.generateDirectChatId(requestData.senderId, recipientId);
     
 
-    // Step 3: Create basic chat document (minimal data)
-    const chatRef = this.db.collection('chats').doc(chatId);
-    const existingChat = await chatRef.get();
+//     // Step 3: Create basic chat document (minimal data)
+//     const chatRef = this.db.collection('chats').doc(chatId);
+//     const existingChat = await chatRef.get();
     
-    if (!existingChat.exists) {
+//     if (!existingChat.exists) {
       
       
-      const basicChatData = {
-        type: 'direct',
-        participants: [requestData.senderId, recipientId],
-        createdAt: firestore.FieldValue.serverTimestamp(),
-        updatedAt: firestore.FieldValue.serverTimestamp(),
-        isActive: true,
-        lastMessage: null
-      };
+//       const basicChatData = {
+//         type: 'direct',
+//         participants: [requestData.senderId, recipientId],
+//         createdAt: firestore.FieldValue.serverTimestamp(),
+//         updatedAt: firestore.FieldValue.serverTimestamp(),
+//         isActive: true,
+//         lastMessage: null
+//       };
 
-      await chatRef.set(basicChatData);
+//       await chatRef.set(basicChatData);
       
       
-    } else {
-      console.log('Chat already exists');
-    }
+//     } else {
+//       console.log('Chat already exists');
+//     }
 
-    // Step 4: Update request status
-    await requestRef.update({
-      status: 'accepted',
-      acceptedAt: firestore.FieldValue.serverTimestamp(),
-      chatId
-    });
+//     // Step 4: Update request status
+//     await requestRef.update({
+//       status: 'accepted',
+//       acceptedAt: firestore.FieldValue.serverTimestamp(),
+//       chatId
+//     });
     
   
-    // Return basic chat data
-    return {
-      id: chatId,
-      type: 'direct',
-      participants: [requestData.senderId, recipientId],
-      isActive: true
-    };
+//     // Return basic chat data
+//     return {
+//       id: chatId,
+//       type: 'direct',
+//       participants: [requestData.senderId, recipientId],
+//       isActive: true
+//     };
 
-  } catch (error) {
-    throw error;
-  }
-}
+//   } catch (error) {
+//     throw error;
+//   }
+// }
 
 // Separate function to send initial message after chat is established
 async sendInitialMessageFromRequest(chatId, senderId, message) {
@@ -713,6 +713,7 @@ async sendMessage(chatId, senderId, text, imageUrl = null) {
       readBy: {
         [senderId]: firestore.FieldValue.serverTimestamp()
       },
+      deliveredTo: {}, // Initialize deliveredTo field for tracking delivery status
       edited: false
     };
 
@@ -824,6 +825,64 @@ async sendMessage(chatId, senderId, text, imageUrl = null) {
       return chatsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     } catch (error) {
       return [];
+    }
+  }
+
+  // Hide a chat for a specific user (delete only from their view, keep shared chat/messages)
+  async deleteChatForUser(chatId, userId) {
+    try {
+      if (!chatId || !userId) {
+        throw new Error('Chat ID and user ID are required');
+      }
+
+      const chatRef = this.db.collection('chats').doc(chatId);
+
+      // 1) Mark this chat as deleted for this specific user on the shared chat document.
+      //    This lets other parts of the app (like fallback loaders) permanently skip it
+      //    for this user, while still keeping it visible for other participants.
+      await chatRef.set(
+        {
+          deletedFor: {
+            [userId]: true,
+          },
+        },
+        { merge: true }
+      );
+
+      // 2) Remove this chat from the user's personal chat list so it disappears immediately.
+      const userChatRef = this.db
+        .collection('userChats')
+        .doc(userId)
+        .collection('chats')
+        .doc(chatId);
+
+      await userChatRef.delete();
+
+      // 3) After marking this user as deleted, check if ALL participants have deleted the chat.
+      //    If yes, clean up the chat and its messages completely.
+      const updatedChatDoc = await chatRef.get();
+      if (updatedChatDoc.exists) {
+        const chatData = updatedChatDoc.data() || {};
+        const participants = Array.isArray(chatData.participants)
+          ? chatData.participants
+          : [];
+        const deletedFor = chatData.deletedFor || {};
+
+        if (participants.length > 0) {
+          const allParticipantsDeleted = participants.every(
+            (participantId) => deletedFor[participantId]
+          );
+
+          if (allParticipantsDeleted) {
+            // All participants have deleted this chat: remove it from DB entirely
+            await this.deleteChatPermanently(chatId);
+          }
+        }
+      }
+
+      return true;
+    } catch (error) {
+      throw error;
     }
   }
 

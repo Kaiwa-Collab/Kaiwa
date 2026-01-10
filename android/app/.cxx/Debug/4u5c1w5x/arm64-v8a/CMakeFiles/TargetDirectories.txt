@@ -13,6 +13,9 @@ D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/arm64-v8a/rngesturehandler
 D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/arm64-v8a/RNImagePickerSpec_autolinked_build/CMakeFiles/react_codegen_RNImagePickerSpec.dir
 D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/arm64-v8a/RNImagePickerSpec_autolinked_build/CMakeFiles/edit_cache.dir
 D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/arm64-v8a/RNImagePickerSpec_autolinked_build/CMakeFiles/rebuild_cache.dir
+D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/arm64-v8a/keyboardcontroller_autolinked_build/CMakeFiles/react_codegen_keyboardcontroller.dir
+D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/arm64-v8a/keyboardcontroller_autolinked_build/CMakeFiles/edit_cache.dir
+D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/arm64-v8a/keyboardcontroller_autolinked_build/CMakeFiles/rebuild_cache.dir
 D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/arm64-v8a/RNPermissionsSpec_autolinked_build/CMakeFiles/react_codegen_RNPermissionsSpec.dir
 D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/arm64-v8a/RNPermissionsSpec_autolinked_build/CMakeFiles/edit_cache.dir
 D:/vcprojects/DevLink/android/app/.cxx/Debug/4u5c1w5x/arm64-v8a/RNPermissionsSpec_autolinked_build/CMakeFiles/rebuild_cache.dir

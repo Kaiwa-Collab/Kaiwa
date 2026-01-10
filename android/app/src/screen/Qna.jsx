@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Image, StyleSheet,
   SafeAreaView, Modal, FlatList, Dimensions, StatusBar, Platform, Alert, TextInput
@@ -13,6 +13,21 @@ import Icon from 'react-native-vector-icons/FontAwesome';
 const { width } = Dimensions.get('window');
 const getStatusBarHeight = () => {
   return Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
+};
+
+// Debounce utility
+const debounce = (func, wait) => {
+  let timeout;
+  return (...args) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func(...args), wait);
+  };
+};
+
+// Input sanitization
+const sanitizeInput = (input) => {
+  if (typeof input !== 'string') return '';
+  return input.trim().replace(/[<>]/g, '').substring(0, 500);
 };
 
 const Qna = () => {
@@ -35,14 +50,24 @@ const Qna = () => {
   const currentUsername = profile?.username;
   const [trendingQuestions, setTrendingQuestions] = useState([]);
   const [loadingTrendingQuestions, setLoadingTrendingQuestions] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  
+  // Pagination
+  const [lastVisible, setLastVisible] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
   
   // Search functionality
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchActiveTab, setSearchActiveTab] = useState('questions'); // 'tech', 'tags', 'questions'
+  const [searchActiveTab, setSearchActiveTab] = useState('questions');
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [popularTags, setPopularTags] = useState([]);
   const [showSearch, setShowSearch] = useState(false);
+
+  // Refs for cleanup
+  const isMounted = useRef(true);
+  const searchAbortController = useRef(null);
 
   // Popular tech tags
   const POPULAR_TECH_TAGS = [
@@ -52,63 +77,148 @@ const Qna = () => {
     'machine-learning', 'ai', 'blockchain', 'web3', 'devops', 'graphql'
   ];
 
-  // Fetch trending questions using trending algorithm
+  // Cleanup on unmount
   useEffect(() => {
-    const loadTrendingQuestions = async () => {
-      if (!currentUser) {
-        setTrendingQuestions([]);
-        return;
-      }
-      
-      setLoadingTrendingQuestions(true);
-      try {
-        const trending = await fetchTrendingQuestions();
-        // Format trending questions to match the same structure as followingQuestions
-        const formattedTrendingQuestions = trending.map(question => ({
-          id: question.id,
-          title: question.title || 'Untitled Question',
-          content: question.content || '',
-          username: question.username || 'Anonymous',
-          userImage: question.userImage || 'https://placehold.co/100',
-          timestamp: question.timestamp,
-          createdAt: question.createdAt || question.timestamp,
-          answers: question.answers || [],
-          tags: question.tags || [],
-          authorId: question.authorId,
-          likes: question.likes || 0,
-          likedBy: question.likedBy || [],
-          imageUrl: question.imageUrl || null,
-          trendingScore: question.trendingScore || 0
-        }));
-        setTrendingQuestions(formattedTrendingQuestions);
-      } catch (error) {
-        console.error('Error loading trending questions:', error);
-        setTrendingQuestions([]);
-      } finally {
-        setLoadingTrendingQuestions(false);
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+      if (searchAbortController.current) {
+        searchAbortController.current.abort();
       }
     };
-
-    loadTrendingQuestions();
-  }, [currentUser, fetchTrendingQuestions]);
-
-  // Load popular tags
-  useEffect(() => {
-    loadPopularTags();
   }, []);
 
-  const loadPopularTags = async () => {
+  // Format question helper
+  const formatQuestion = useCallback((question) => ({
+    id: question.id,
+    title: question.title || 'Untitled Question',
+    content: question.content || '',
+    username: question.username || 'Anonymous',
+    userImage: question.userImage || 'https://placehold.co/100',
+    timestamp: question.timestamp,
+    createdAt: question.createdAt || question.timestamp,
+    answers: question.answers || [],
+    tags: question.tags || [],
+    authorId: question.authorId,
+    likes: question.likes || 0,
+    likedBy: question.likedBy || [],
+    imageUrl: question.imageUrl || null,
+    trendingScore: question.trendingScore || 0
+  }), []);
+
+  // Fetch trending questions with error handling
+  const loadTrendingQuestions = useCallback(async (silent = false) => {
+    if (!currentUser) {
+      setTrendingQuestions([]);
+      return;
+    }
+    
+    if (!silent && trendingQuestions.length === 0) {
+      setLoadingTrendingQuestions(true);
+    }
+    
+    try {
+      const trending = await fetchTrendingQuestions();
+      
+      if (!isMounted.current) return;
+      
+      const formattedTrendingQuestions = trending.map(formatQuestion);
+      setTrendingQuestions(formattedTrendingQuestions);
+    } catch (error) {
+      console.error('Error loading trending questions:', error);
+      if (isMounted.current) {
+        setTrendingQuestions([]);
+      }
+    } finally {
+      if (isMounted.current) {
+        setLoadingTrendingQuestions(false);
+      }
+    }
+  }, [currentUser, fetchTrendingQuestions, formatQuestion, trendingQuestions.length]);
+
+  // Initial load
+  useEffect(() => {
+    loadTrendingQuestions(false);
+  }, [currentUser]);
+
+  // Background refresh with proper interval cleanup
+  useEffect(() => {
+    if (!currentUser) return;
+    
+    const interval = setInterval(() => {
+      loadTrendingQuestions(true); // Silent refresh
+    }, 5 * 60 * 1000); // 5 minutes
+    
+    return () => clearInterval(interval);
+  }, [currentUser, loadTrendingQuestions]);
+
+  // Real-time listener for main feed (following users)
+  useEffect(() => {
+    if (!currentUser || !profile?.following || profile.following.length === 0) {
+      return;
+    }
+
+    // Firestore 'in' query limit is 10, so we need to batch if following > 10 users
+    const followingIds = profile.following.slice(0, 10);
+    
+    const unsubscribe = Firestore()
+      .collection('questions')
+      .where('authorId', 'in', followingIds)
+      .orderBy('timestamp', 'desc')
+      .limit(50)
+      .onSnapshot(
+        (snapshot) => {
+          if (!isMounted.current) return;
+          // Changes are handled by the context, this is just for real-time updates
+          console.log('Real-time update received for following questions');
+        },
+        (error) => {
+          console.error('Error in real-time listener:', error);
+        }
+      );
+
+    return () => unsubscribe();
+  }, [currentUser, profile?.following]);
+
+  // Pull to refresh
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        loadTrendingQuestions(false),
+        loadPopularTags()
+      ]);
+    } catch (error) {
+      console.error('Error refreshing:', error);
+      Alert.alert('Error', 'Failed to refresh. Please try again.');
+    } finally {
+      if (isMounted.current) {
+        setRefreshing(false);
+      }
+    }
+  }, [loadTrendingQuestions]);
+
+  // Load popular tags with security
+  const loadPopularTags = useCallback(async () => {
     try {
       const questionsSnapshot = await Firestore()
         .collection('questions')
+        .orderBy('timestamp', 'desc')
         .limit(500)
         .get();
 
+      if (!isMounted.current) return;
+
       const tagCount = {};
       questionsSnapshot.docs.forEach(doc => {
-        const tags = doc.data().tags || [];
+        const data = doc.data();
+        const tags = Array.isArray(data.tags) ? data.tags : [];
         tags.forEach(tag => {
-          tagCount[tag] = (tagCount[tag] || 0) + 1;
+          // Sanitize tags
+          const sanitizedTag = sanitizeInput(tag).toLowerCase();
+          if (sanitizedTag && sanitizedTag.length > 0) {
+            tagCount[sanitizedTag] = (tagCount[sanitizedTag] || 0) + 1;
+          }
         });
       });
 
@@ -117,40 +227,68 @@ const Qna = () => {
         .slice(0, 20)
         .map(([tag, count]) => ({ tag, count }));
 
-      setPopularTags(sortedTags);
+      if (isMounted.current) {
+        setPopularTags(sortedTags);
+      }
     } catch (error) {
       console.error('Error loading popular tags:', error);
     }
-  };
+  }, []);
 
-  const handleSearch = async (text) => {
-    setSearchQuery(text);
-    
-    if (text.trim().length === 0) {
-      setSearchResults([]);
-      return;
-    }
-    
-    if (text.trim().length < 2) {
-      setSearchResults([]);
-      return;
-    }
+  useEffect(() => {
+    loadPopularTags();
+  }, [loadPopularTags]);
 
-    setSearchLoading(true);
-    try {
-      if (searchActiveTab === 'questions') {
-        await searchQuestions(text);
-      } else if (searchActiveTab === 'tags') {
-        await searchByTags(text);
-      } else if (searchActiveTab === 'tech') {
-        await searchByTech(text);
+  // Debounced search with abort controller
+  const debouncedSearch = useMemo(
+    () => debounce(async (text) => {
+      // Cancel previous search
+      if (searchAbortController.current) {
+        searchAbortController.current.abort();
       }
-    } catch (error) {
-      console.error('Error searching:', error);
-      setSearchResults([]);
-    } finally {
-      setSearchLoading(false);
-    }
+      
+      const sanitizedText = sanitizeInput(text);
+      
+      if (sanitizedText.length === 0) {
+        setSearchResults([]);
+        return;
+      }
+      
+      if (sanitizedText.length < 2) {
+        setSearchResults([]);
+        return;
+      }
+
+      searchAbortController.current = new AbortController();
+      setSearchLoading(true);
+      
+      try {
+        if (searchActiveTab === 'questions') {
+          await searchQuestions(sanitizedText);
+        } else if (searchActiveTab === 'tags') {
+          await searchByTags(sanitizedText);
+        } else if (searchActiveTab === 'tech') {
+          await searchByTech(sanitizedText);
+        }
+      } catch (error) {
+        if (error.name !== 'AbortError') {
+          console.error('Error searching:', error);
+          if (isMounted.current) {
+            setSearchResults([]);
+          }
+        }
+      } finally {
+        if (isMounted.current) {
+          setSearchLoading(false);
+        }
+      }
+    }, 300),
+    [searchActiveTab]
+  );
+
+  const handleSearch = (text) => {
+    setSearchQuery(text);
+    debouncedSearch(text);
   };
 
   const searchQuestions = async (text) => {
@@ -162,20 +300,22 @@ const Qna = () => {
         .limit(100)
         .get();
 
+      if (!isMounted.current) return;
+
       const allQuestions = questionsSnapshot.docs.map(doc => {
         const data = doc.data();
         return {
           id: doc.id,
-          title: data.title,
-          content: data.content,
-          username: data.username,
-          userImage: data.userImage,
+          title: data.title || '',
+          content: data.content || '',
+          username: data.username || 'Anonymous',
+          userImage: data.userImage || 'https://placehold.co/100',
           timestamp: data.timestamp?.toDate ? data.timestamp.toDate() : data.timestamp,
-          answers: data.answers || [],
-          tags: data.tags || [],
+          answers: Array.isArray(data.answers) ? data.answers : [],
+          tags: Array.isArray(data.tags) ? data.tags : [],
           authorId: data.authorId,
-          likes: data.likes || 0,
-          likedBy: data.likedBy || [],
+          likes: typeof data.likes === 'number' ? data.likes : 0,
+          likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
           imageUrl: data.imageUrl || null
         };
       });
@@ -190,10 +330,14 @@ const Qna = () => {
         .sort((a, b) => (b.likes || 0) - (a.likes || 0))
         .slice(0, 20);
 
-      setSearchResults(sorted);
+      if (isMounted.current) {
+        setSearchResults(sorted);
+      }
     } catch (error) {
       console.error('Error searching questions:', error);
-      setSearchResults([]);
+      if (isMounted.current) {
+        setSearchResults([]);
+      }
     }
   };
 
@@ -206,20 +350,22 @@ const Qna = () => {
         .limit(200)
         .get();
 
+      if (!isMounted.current) return;
+
       const allQuestions = questionsSnapshot.docs.map(doc => {
         const data = doc.data();
         return {
           id: doc.id,
-          title: data.title,
-          content: data.content,
-          username: data.username,
-          userImage: data.userImage,
+          title: data.title || '',
+          content: data.content || '',
+          username: data.username || 'Anonymous',
+          userImage: data.userImage || 'https://placehold.co/100',
           timestamp: data.timestamp?.toDate ? data.timestamp.toDate() : data.timestamp,
-          answers: data.answers || [],
-          tags: data.tags || [],
+          answers: Array.isArray(data.answers) ? data.answers : [],
+          tags: Array.isArray(data.tags) ? data.tags : [],
           authorId: data.authorId,
-          likes: data.likes || 0,
-          likedBy: data.likedBy || [],
+          likes: typeof data.likes === 'number' ? data.likes : 0,
+          likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
           imageUrl: data.imageUrl || null
         };
       });
@@ -233,28 +379,32 @@ const Qna = () => {
         .sort((a, b) => (b.likes || 0) - (a.likes || 0))
         .slice(0, 20);
 
-      setSearchResults(sorted);
+      if (isMounted.current) {
+        setSearchResults(sorted);
+      }
     } catch (error) {
       console.error('Error searching by tags:', error);
-      setSearchResults([]);
+      if (isMounted.current) {
+        setSearchResults([]);
+      }
     }
   };
 
   const searchByTech = async (text) => {
-    // Search by tech stack - similar to tags but focused on technologies
     await searchByTags(text);
   };
 
-  const handleTagPress = (tag) => {
-    setSearchQuery(tag);
+  const handleTagPress = useCallback((tag) => {
+    const sanitizedTag = sanitizeInput(tag);
+    setSearchQuery(sanitizedTag);
     setSearchActiveTab('tags');
-    searchByTags(tag);
+    searchByTags(sanitizedTag);
     setShowSearch(true);
-  };
+  }, []);
 
   useFocusEffect(
     React.useCallback(() => {
-      if (route.params?.clearSelection===true) {
+      if (route.params?.clearSelection === true) {
         setSelectedQuestion(null);
       }
     }, [route.params?.clearSelection])
@@ -266,16 +416,21 @@ const Qna = () => {
         const unsubscribe = Firestore()
           .collection('questions')
           .doc(selectedQuestion.id)
-          .onSnapshot((doc) => {
-            if (doc.exists) {
-              const updated = doc.data();
-              setSelectedQuestion(prev => ({
-                ...prev,
-                ...updated,
-                answers: updated.answers || []
-              }));
+          .onSnapshot(
+            (doc) => {
+              if (doc.exists && isMounted.current) {
+                const updated = doc.data();
+                setSelectedQuestion(prev => ({
+                  ...prev,
+                  ...updated,
+                  answers: Array.isArray(updated.answers) ? updated.answers : []
+                }));
+              }
+            },
+            (error) => {
+              console.error('Error in question snapshot:', error);
             }
-          });
+          );
 
         return () => unsubscribe();
       }
@@ -318,24 +473,23 @@ const Qna = () => {
       username: question.username || 'Anonymous',
       userImage: getCachedImageUri(question.userImage || question.avatar || 'https://placehold.co/100'),
       timestamp: toDate(question.createdAt || question.timestamp),
-      answers: (question.answers || []).map(ans => ({
+      answers: (Array.isArray(question.answers) ? question.answers : []).map(ans => ({
         ...ans,
         timestamp: toDate(ans.timestamp || ans.createdAt),
-        replies: (ans.replies || []).map(reply => ({
+        replies: (Array.isArray(ans.replies) ? ans.replies : []).map(reply => ({
           ...reply,
           timestamp: toDate(reply.timestamp)
         }))
       })),
-      tags: question.tags || [],
+      tags: Array.isArray(question.tags) ? question.tags : [],
       authorId: question.userId || question.authorId,
       imageUrl: question.imageUrl ? getCachedImageUri(question.imageUrl) : null,
-      likes: question.likes || 0,
-      likedBy: question.likedBy || []
+      likes: typeof question.likes === 'number' ? question.likes : 0,
+      likedBy: Array.isArray(question.likedBy) ? question.likedBy : []
     }));
   }, [followingQuestions, getCachedImageUri]);
 
   const filteredQuestions = useMemo(() => {
-    // Format trending questions
     const formattedTrendingQuestions = trendingQuestions.map(question => ({
       id: question.id,
       title: question.title || question.question || 'Untitled Question',
@@ -343,50 +497,43 @@ const Qna = () => {
       username: question.username || 'Anonymous',
       userImage: getCachedImageUri(question.userImage || question.avatar || 'https://placehold.co/100'),
       timestamp: toDate(question.createdAt || question.timestamp),
-      answers: (question.answers || []).map(ans => ({
+      answers: (Array.isArray(question.answers) ? question.answers : []).map(ans => ({
         ...ans,
         timestamp: toDate(ans.timestamp || ans.createdAt),
-        replies: (ans.replies || []).map(reply => ({
+        replies: (Array.isArray(ans.replies) ? ans.replies : []).map(reply => ({
           ...reply,
           timestamp: toDate(reply.timestamp)
         }))
       })),
-      tags: question.tags || [],
+      tags: Array.isArray(question.tags) ? question.tags : [],
       authorId: question.userId || question.authorId,
       imageUrl: question.imageUrl ? getCachedImageUri(question.imageUrl) : null,
-      likes: question.likes || 0,
-      likedBy: question.likedBy || [],
+      likes: typeof question.likes === 'number' ? question.likes : 0,
+      likedBy: Array.isArray(question.likedBy) ? question.likedBy : [],
       trendingScore: question.trendingScore || 0,
-      isTrending: true // Mark trending questions
+      isTrending: true
     }));
 
-    // Format following questions (existing logic)
     const formattedFollowingQuestions = questions
       .filter(q => q.username !== currentUsername)
       .map(q => ({ ...q, isTrending: false }));
 
-    // Combine both lists
     const allQuestions = [...formattedTrendingQuestions, ...formattedFollowingQuestions];
 
-    // Remove duplicates based on question ID
     const uniqueQuestions = allQuestions.filter((question, index, self) =>
       index === self.findIndex(q => q.id === question.id)
     );
 
-    // Sort: trending questions first (by trending score desc), then following questions (by timestamp desc)
     return uniqueQuestions.sort((a, b) => {
-      // If both are trending, sort by trending score descending
       if (a.isTrending && b.isTrending) {
         return (b.trendingScore || 0) - (a.trendingScore || 0);
       }
-      // Trending questions always come first
       if (a.isTrending && !b.isTrending) {
         return -1;
       }
       if (!a.isTrending && b.isTrending) {
         return 1;
       }
-      // Both are following questions, sort by timestamp descending
       return b.timestamp - a.timestamp;
     });
   }, [questions, trendingQuestions, currentUsername, getCachedImageUri]);
@@ -397,7 +544,6 @@ const Qna = () => {
       return validDate.toLocaleDateString() + ' ' +
         validDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     } catch (error) {
-      
       return 'Unknown date';
     }
   };
@@ -419,22 +565,21 @@ const Qna = () => {
     return itemTime.toLocaleDateString();
   };
 
-  // Question Card
+  // Question Card with security improvements
   const QuestionCard = React.memo(({ question }) => {
     const [isLiked, setIsLiked] = useState(false);
     const [likeCount, setLikeCount] = useState(question.likes || 0);
     const [updating, setUpdating] = useState(false);
 
-    // Initialize like state
     useEffect(() => {
-      if (currentUser && question.likedBy) {
+      if (currentUser && Array.isArray(question.likedBy)) {
         setIsLiked(question.likedBy.includes(currentUser.uid));
       }
-      setLikeCount(question.likes || 0);
+      setLikeCount(typeof question.likes === 'number' ? question.likes : 0);
     }, [question.likedBy, question.likes, currentUser]);
 
     const handleLike = async (e) => {
-      e.stopPropagation(); // Prevent card press
+      e.stopPropagation();
       
       if (!currentUser) {
         Alert.alert('Login Required', 'Please log in to like questions.');
@@ -442,36 +587,37 @@ const Qna = () => {
       }
 
       if (updating) return;
+      
+      // Validate question ID
+      if (!question.id || typeof question.id !== 'string') {
+        Alert.alert('Error', 'Invalid question ID');
+        return;
+      }
+
       setUpdating(true);
+
+      // Optimistic update
+      const newIsLiked = !isLiked;
+      const newLikeCount = newIsLiked ? likeCount + 1 : Math.max(0, likeCount - 1);
+      setIsLiked(newIsLiked);
+      setLikeCount(newLikeCount);
 
       try {
         const questionRef = Firestore().collection('questions').doc(question.id);
         
-        if (isLiked) {
-          // Unlike
-          await questionRef.update({
-            likes: Firestore.FieldValue.increment(-1),
-            likedBy: Firestore.FieldValue.arrayRemove(currentUser.uid),
-            updatedAt: Firestore.FieldValue.serverTimestamp()
-          });
-          setIsLiked(false);
-          setLikeCount(prev => Math.max(0, prev - 1));
-        } else {
-          // Like
-          await questionRef.update({
-            likes: Firestore.FieldValue.increment(1),
-            likedBy: Firestore.FieldValue.arrayUnion(currentUser.uid),
-            updatedAt: Firestore.FieldValue.serverTimestamp()
-          });
-          setIsLiked(true);
-          setLikeCount(prev => prev + 1);
-        }
+        await questionRef.update({
+          likes: Firestore.FieldValue.increment(newIsLiked ? 1 : -1),
+          likedBy: newIsLiked 
+            ? Firestore.FieldValue.arrayUnion(currentUser.uid)
+            : Firestore.FieldValue.arrayRemove(currentUser.uid),
+          updatedAt: Firestore.FieldValue.serverTimestamp()
+        });
       } catch (error) {
         console.error('Error updating like:', error);
         Alert.alert('Error', 'Failed to update like. Please try again.');
         // Revert optimistic update
-        setIsLiked(!isLiked);
-        setLikeCount(prev => isLiked ? prev + 1 : Math.max(0, prev - 1));
+        setIsLiked(!newIsLiked);
+        setLikeCount(newIsLiked ? Math.max(0, newLikeCount - 1) : newLikeCount + 1);
       } finally {
         setUpdating(false);
       }
@@ -500,7 +646,7 @@ const Qna = () => {
           <Image source={{ uri: question.imageUrl }} style={styles.questionImage} />
         )}
         
-        {question.tags && question.tags.length > 0 && (
+        {Array.isArray(question.tags) && question.tags.length > 0 && (
           <View style={styles.tagsContainer}>
             {question.tags.slice(0, 3).map((tag, index) => (
               <View key={index} style={styles.tagChip}>
@@ -540,41 +686,39 @@ const Qna = () => {
 
   // Reply Item Component
   const ReplyItem = React.memo(({ reply, parentAnswerId }) => {
-  return (
-    <View style={styles.replyContainer}>
-      <Image 
-        source={{ uri: getCachedImageUri(reply.userImage) || reply.userImage || 'https://placehold.co/100' }} 
-        style={styles.replyAvatar} 
-      />
-      <View style={styles.replyContent}>
-        <Text style={styles.replyText}>
-          <Text style={styles.replyUsername}>{reply.username}</Text> {reply.content}
-        </Text>
-        
-        {/* Add code block rendering for replies */}
-        {reply.code && (
-          <View style={styles.replyCodeBlock}>
-            <Text style={styles.codeText}>{reply.code}</Text>
-          </View>
-        )}
-        
-        {/* Add image rendering for replies - check both formats */}
-        {reply.image && (
-          <Image 
-            source={{ uri: reply.image.uri || reply.image }} 
-            style={styles.replyImage} 
-          />
-        )}
-        
-        <View style={styles.replyActions}>
-          <Text style={styles.replyTimestamp}>
-            {formatTimestamp(reply.timestamp)}
+    return (
+      <View style={styles.replyContainer}>
+        <Image 
+          source={{ uri: getCachedImageUri(reply.userImage) || reply.userImage || 'https://placehold.co/100' }} 
+          style={styles.replyAvatar} 
+        />
+        <View style={styles.replyContent}>
+          <Text style={styles.replyText}>
+            <Text style={styles.replyUsername}>{reply.username}</Text> {reply.content}
           </Text>
+          
+          {reply.code && (
+            <View style={styles.replyCodeBlock}>
+              <Text style={styles.codeText}>{reply.code}</Text>
+            </View>
+          )}
+          
+          {reply.image && (
+            <Image 
+              source={{ uri: reply.image.uri || reply.image }} 
+              style={styles.replyImage} 
+            />
+          )}
+          
+          <View style={styles.replyActions}>
+            <Text style={styles.replyTimestamp}>
+              {formatTimestamp(reply.timestamp)}
+            </Text>
+          </View>
         </View>
       </View>
-    </View>
-  );
-});
+    );
+  });
 
   // Answer Component
   const AnswerItem = React.memo(({ answer }) => {
@@ -600,8 +744,7 @@ const Qna = () => {
           <Image source={{ uri: answer.image.uri }} style={styles.answerImage} />
         )}
 
-        {/* Replies Section */}
-        {answer.replies && answer.replies.length > 0 && (
+        {Array.isArray(answer.replies) && answer.replies.length > 0 && (
           <View style={styles.repliesContainer}>
             <Text style={styles.repliesTitle}>
               {answer.replies.length} {answer.replies.length === 1 ? 'Reply' : 'Replies'}
@@ -626,7 +769,6 @@ const Qna = () => {
     );
   });
 
-  // Format search results for display
   const formattedSearchResults = useMemo(() => {
     return searchResults.map(question => ({
       id: question.id,
@@ -635,19 +777,19 @@ const Qna = () => {
       username: question.username || 'Anonymous',
       userImage: getCachedImageUri(question.userImage || 'https://placehold.co/100'),
       timestamp: toDate(question.timestamp),
-      answers: (question.answers || []).map(ans => ({
+      answers: (Array.isArray(question.answers) ? question.answers : []).map(ans => ({
         ...ans,
         timestamp: toDate(ans.timestamp || ans.createdAt),
-        replies: (ans.replies || []).map(reply => ({
+        replies: (Array.isArray(ans.replies) ? ans.replies : []).map(reply => ({
           ...reply,
           timestamp: toDate(reply.timestamp)
         }))
       })),
-      tags: question.tags || [],
+      tags: Array.isArray(question.tags) ? question.tags : [],
       authorId: question.authorId,
       imageUrl: question.imageUrl ? getCachedImageUri(question.imageUrl) : null,
-      likes: question.likes || 0,
-      likedBy: question.likedBy || []
+      likes: typeof question.likes === 'number' ? question.likes : 0,
+      likedBy: Array.isArray(question.likedBy) ? question.likedBy : []
     }));
   }, [searchResults, getCachedImageUri]);
 
@@ -886,13 +1028,13 @@ const Qna = () => {
     );
   });
 
-  if (loading || loadingTrendingQuestions) {
-    return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1e1e1e' }}>
-        <Text style={{ color: 'white' }}>Loading your data...</Text>
-      </View>
-    );
-  }
+ if (loading && followingQuestions.length === 0) {
+  return (
+    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1e1e1e' }}>
+      <Text style={{ color: 'white' }}>Loading your data...</Text>
+    </View>
+  );
+}
 
   return (
     <>
@@ -1036,7 +1178,8 @@ const styles = StyleSheet.create({
   },
   backButtonText: {
     color: 'white',
-    fontSize: 16,
+    fontSize: 30,
+    fontWeight: '6000',
   },
   answerButton: {
     backgroundColor: 'white',
@@ -1124,7 +1267,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   tagChip: {
-    backgroundColor: '#e8f4ff',
+    backgroundColor: '#FF6D1F',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 12,

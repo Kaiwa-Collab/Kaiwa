@@ -5,6 +5,7 @@ import { StatusBar } from 'react-native'; // Added StatusBar import
 import auth from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
 import signup_G from './signup_G';
+import presenceService from './presenceService';
 
 import HomeScreen from './HomeScreen';
 import SignUp from './SignUp';
@@ -13,6 +14,7 @@ import ChatScreen from './ChatScreen';
 import CommentScreen from './CommentScreen';
 import Settings from './Settings';
 import Username from './Username';
+import { KeyboardProvider } from 'react-native-keyboard-controller';
 // import ChatScreen from './ChatScreen';
 import MessageRequestsScreen from './MessageRequestsScreen';
 
@@ -31,6 +33,7 @@ function AppNavigator({ user, hasUsername }) {
   };
 
   return (
+    
     <Stack.Navigator 
       screenOptions={{ headerShown: false }}
       initialRouteName={getInitialRouteName()}
@@ -103,6 +106,11 @@ export default function AuthWrapper() {
           const userDoc = await firestore().collection('users').doc(user.uid).get();
           const userData = userDoc.data();
           setHasUsername(!!(userData && userData.username));
+          
+          // Initialize presence tracking for authenticated users
+          if (userData && userData.username) {
+            presenceService.initialize(user.uid);
+          }
         } catch (error) {
           console.error('Error checking username:', error);
           setHasUsername(false);
@@ -112,9 +120,16 @@ export default function AuthWrapper() {
       } else {
         setHasUsername(false);
         setCheckingUsername(false);
+        // Cleanup presence tracking when user logs out
+        presenceService.cleanup();
       }
     });
-    return unsubscribe;
+    
+    return () => {
+      unsubscribe();
+      // Cleanup presence service on unmount
+      presenceService.cleanup();
+    };
   }, [initializing]);
 
   if (initializing || checkingUsername) return null;

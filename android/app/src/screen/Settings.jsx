@@ -6,6 +6,7 @@ import storage from '@react-native-firebase/storage';
 import { useNavigation } from '@react-navigation/native';
 import { CommonActions } from '@react-navigation/native';
 import { Platform } from 'react-native';
+import githubconnection from '../githubservices/githubConnection';
 import Addbio from './Addbio';
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 const Settings = () => {
@@ -250,7 +251,7 @@ const Settings = () => {
       <TouchableOpacity style={styles.backButton}
       onPress={()=>handlegoback()}
       >
-        <Text style={styles.backButtonText}>← Back</Text>
+        <Text style={styles.backButtonText}>←</Text>
       </TouchableOpacity>
       
       </View>
@@ -267,6 +268,13 @@ const Settings = () => {
         <Text style={styles.AddbiotextText}>Add Bio</Text>
       </TouchableOpacity>
       
+      <TouchableOpacity
+        onPress={() => navigation.navigate('FollowersFollowing')} 
+        style={styles.followersFollowing}
+      >
+        <Text style={styles.followersFollowingText}>Followers & Following</Text>
+      </TouchableOpacity>
+      
       <TouchableOpacity onPress={handleSignOut} style={styles.signOut}>
         <Text style={styles.logoutText}>Logout</Text>
       </TouchableOpacity>
@@ -274,6 +282,15 @@ const Settings = () => {
       <TouchableOpacity onPress={handleDeleteAccount} style={styles.deleteAccount}>
         <Text style={styles.deleteText}>Delete Account</Text>
       </TouchableOpacity>
+
+      
+        <TouchableOpacity
+        onPress={() => navigation.navigate('githubConnection')} 
+        style={styles.followersFollowing}
+      >
+        <Text style={styles.followersFollowingText}>github</Text>
+      </TouchableOpacity>
+
 
       
     </View>
@@ -285,13 +302,13 @@ export default Settings;
 const styles = StyleSheet.create({
 
 backButton: {
-    paddingVertical: 8,
+    paddingVertical: 15,
     position: 'absolute',
-    left: 16, 
+    left: 20, 
   },
   backButtonText: {
     color: 'white',
-    fontSize: 16,
+    fontSize: 30,
   },
 
   container: { flex: 1, 
@@ -332,6 +349,28 @@ backButton: {
      fontWeight: '600', 
      fontSize: 16 
 
+  },
+  followersFollowing: {
+    width: '100%',
+    marginBottom: 2,
+    borderWidth: 1,
+    borderBottomColor: 'white',
+    marginTop: 4,
+    backgroundColor: '#333',
+    padding: 15,
+    borderBottomColor: 'white',
+    borderRadius: 1,
+    alignItems: 'center',
+    shadowColor: 'white',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 1,
+    shadowRadius: 1,
+    elevation: 1.5,
+  },
+  followersFollowingText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 16,
   },
   title: {
      fontSize: 20,
