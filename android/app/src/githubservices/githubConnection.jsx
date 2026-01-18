@@ -7,7 +7,11 @@ import auth from '@react-native-firebase/auth';
 import { Github_Config } from '../config/githubconfig';
 import { TouchableOpacity } from 'react-native';
 import { getGitHubStatus } from '../../service/getGitHubStatus';
+import { StatusBar,Platform } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 
+
+const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 
 // configuration
 
@@ -15,6 +19,7 @@ import { getGitHubStatus } from '../../service/getGitHubStatus';
 
 
 const githubConnection = () => {
+  const navigation = useNavigation();
   const [isConnected, setIsConnected] = useState(false);
   const [githubUsername, setGithubUsername] = useState('');
   const [loading, setLoading] = useState(true);
@@ -190,9 +195,14 @@ const exchangeCodeForToken = async (code) => {
        
 return (
     <View style={styles.container}>
-      <View style={styles.header}>
-        <Icon name="logo-github" size={24} color="white" />
-        <Text style={styles.title}>GitHub Integration</Text>
+      <View style={styles.statusBarSpacer}></View>
+      <View style={styles.containertitle}>
+      <Text style={styles.title}>GitHub Integration</Text>
+      <TouchableOpacity style={styles.backButton}
+      onPress={()=>navigation.goBack()}
+      >
+        <Text style={styles.backButtonText}>←</Text>
+      </TouchableOpacity>
       </View>
 
       {isConnected ? (
@@ -200,7 +210,7 @@ return (
         <View style={styles.connectedContainer}>
           <View style={styles.statusRow}>
             <View style={styles.statusLeft}>
-              <Icon name="checkmark-circle" size={20} color="#10B981" />
+              <Icon name="checkmark-circle" size={20} color="#10B981"  />
               <Text style={styles.connectedText}>Connected</Text>
             </View>
             <Text style={styles.username}>@{githubUsername}</Text>
@@ -213,7 +223,7 @@ return (
             </View>
             <View style={styles.featureItem}>
               <Icon name="notifications-outline" size={16} color="#10B981" />
-              <Text style={styles.featureText}>Get commit notifications</Text>
+              <Text style={styles.featureText}>Get notifications of the changes made in repo </Text>
             </View>
           </View>
 
@@ -250,24 +260,36 @@ return (
 // ============================================================================
 
 const styles = StyleSheet.create({
-  container: {
-    backgroundColor: '#2a2a2a',
-    borderRadius: 12,
-    padding: 16,
-    marginVertical: 10,
-    borderWidth: 1,
-    borderColor: '#333',
-  },
-  header: {
-    flexDirection: 'row',
+   container: { 
+    flex: 1, 
+    
+    backgroundColor: '#1e1e1e',
+    
+    
+   },
+  containertitle: {
+    height: 50,
+    backgroundColor: '#1e1e1e',
+    justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 12,
+    paddingHorizontal: 5,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  backButton: {
+    paddingVertical: 15,
+    position: 'absolute',
+    left: 20, 
+  },
+  backButtonText: {
+    color: 'white',
+    fontSize: 30,
   },
   title: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: 'white',
-    marginLeft: 10,
+    fontSize: 20,
+    fontWeight: 'bold',
+    textAlign: 'center',
+    color: 'white'
   },
   loadingText: {
     color: '#999',
@@ -288,6 +310,7 @@ const styles = StyleSheet.create({
   statusLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    marginLeft:10
   },
   connectedText: {
     fontSize: 16,
@@ -299,9 +322,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#007AFF',
     fontWeight: '600',
+    marginRight:30
   },
   features: {
     marginBottom: 12,
+    marginLeft:10
   },
   featureItem: {
     flexDirection: 'row',
@@ -311,7 +336,7 @@ const styles = StyleSheet.create({
   featureText: {
     fontSize: 13,
     color: '#ccc',
-    marginLeft: 8,
+    marginLeft: 10,
   },
   disconnectButton: {
     backgroundColor: '#ef4444',
@@ -349,6 +374,10 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     marginLeft: 10,
+  },
+  statusBarSpacer: {
+    height: getStatusBarHeight(),
+    backgroundColor: '#1e1e1e'
   },
 });
 

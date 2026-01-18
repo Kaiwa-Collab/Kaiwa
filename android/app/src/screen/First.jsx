@@ -1297,7 +1297,7 @@ export default function First() {
             name="ConversationsScreen"
             component={ConversationsScreen}
             options={{
-              title: 'DevLink',
+              title: 'Kaiwa',
               headerTitleAlign: 'center',
               headerTitleStyle: {
                 fontWeight: 'bold',

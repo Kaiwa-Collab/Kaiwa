@@ -19,9 +19,9 @@ android/app/build/
 android/local.properties
 android/.cxx/
 android/app/google-services.json
-android\app\src\config\githubconfig.js
-DevLink\PRESENCE_FIX_SUMMARY.md
-DevLink\WRITE_OPTIMIZATION_ANALYSIS.md
+android/app/src/config/
+PRESENCE_FIX_SUMMARY.md
+WRITE_OPTIMIZATION_ANALYSIS.md
 
 # iOS
 ios/Pods/

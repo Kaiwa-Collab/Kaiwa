@@ -185,12 +185,22 @@ const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLiked
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <Image source={{ uri: Avatar }} style={styles.avatar} />
+        {Avatar ? (
+          <Image source={{ uri: Avatar }} style={styles.avatar} />
+        ) : (
+          <View style={styles.avatarPlaceholder} />
+        )}
         <Text style={styles.username}>{name}</Text>
       </View>
 
       {/* Post Image */}
-      <Image source={{ uri: image }} style={styles.postImage} resizeMode="cover" />
+      {image ? (
+        <Image source={{ uri: image }} style={styles.postImage} resizeMode="cover" />
+      ) : (
+        <View style={styles.postImagePlaceholder}>
+          <Text style={styles.placeholderText}>No image</Text>
+        </View>
+      )}
 
       {/* Caption */}
       <View style={styles.captionContainer}>
@@ -274,6 +284,12 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: '#555',
   },
+  avatarPlaceholder: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#555',
+  },
   create: {
     color: 'white',
     fontSize: 14,
@@ -292,6 +308,20 @@ const styles = StyleSheet.create({
     borderBottomRadius: 2,
     borderBottomWidth: 1,
     borderBottomColor: 'white',
+  },
+  postImagePlaceholder: {
+    width: '100%',
+    height: 300,
+    backgroundColor: '#222',
+    borderBottomRadius: 2,
+    borderBottomWidth: 1,
+    borderBottomColor: 'white',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  placeholderText: {
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontSize: 14,
   },
   actions: {
     flexDirection: 'row',

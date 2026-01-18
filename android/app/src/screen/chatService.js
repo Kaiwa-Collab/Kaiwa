@@ -663,7 +663,7 @@ async acceptMessageRequest(requestId, recipientId) {
   // Send message
   
 
-async sendMessage(chatId, senderId, text, imageUrl = null) {
+async sendMessage(chatId, senderId, text, mediaUrl = null,mediaType=null) {
   try {
     
 
@@ -701,14 +701,25 @@ async sendMessage(chatId, senderId, text, imageUrl = null) {
       throw new Error('Sender is not a participant in this chat');
     }
 
-    
+    let finalMessageType='text';
+    if(mediaUrl,mediaType){
+      finalMessageType=mediaType;  
+    }else if(mediaUrl){
+      if(mediaUrl.includes('.mp4')||mediaUrl.includes('.mov')){
+        finalMesageType='video';
+
+      }else if(mediaUrl.includes('.jpg')||mediaUrl.includes('.png')||mediaUrl.includes('.jpeg')||mediaUrl.includes('.gif')){
+        finalMesageType='image';
+    }
+    }
 
     // Create message data
     const messageData = {
       senderId,
       text: text || '',
-      imageUrl,
-      messageType: imageUrl ? 'image' : 'text',
+      imageUrl: finalMessageType === 'image' ? mediaUrl : null,
+    videoUrl: finalMessageType === 'video' ? mediaUrl : null,
+      messageType: finalMessageType,
       createdAt: firestore.FieldValue.serverTimestamp(),
       readBy: {
         [senderId]: firestore.FieldValue.serverTimestamp()
@@ -727,10 +738,11 @@ async sendMessage(chatId, senderId, text, imageUrl = null) {
    
 
     // Update chat's last message
+    const lastMessageText=text||(mediaType==='image'?'image':mediaType==='video'?'video':'Media');
     const lastMessageData = {
       id: messageRef.id,
       senderId,
-      text: text || (imageUrl ? '📷 Image' : ''),
+      text: lastMessageText,
       createdAt: firestore.FieldValue.serverTimestamp()
     };
 

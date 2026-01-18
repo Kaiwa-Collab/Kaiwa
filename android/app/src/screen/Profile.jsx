@@ -60,6 +60,9 @@ const Profile = () => {
   const [projectAbout, setProjectAbout] = useState('');
   const [projectTech, setProjectTech] = useState('');
   const [githubRepo, setGithubRepo] = useState('');
+  
+// Add this state at the top with your other states
+const [deletingProject, setDeletingProject] = useState(false);
   // Editable project form states
   const [editProjectTitle, setEditProjectTitle] = useState('');
   const [editProjectAbout, setEditProjectAbout] = useState('');
@@ -75,7 +78,7 @@ const Profile = () => {
   const [collaborationProjects, setCollaborationProjects] = useState([]);
 
   const isOwnProfile = viewedUserId === currentUser?.uid;
-  const canViewContent = isOwnProfile || isFollowing;
+  const canViewContent = isOwnProfile || isFollowing || !userProfile?.isPrivate;
 
   // Refresh function
   const onRefresh = useCallback(async () => {
@@ -195,18 +198,59 @@ const Profile = () => {
     setFilteredUsers([]);
   };
 
+
+const setupGitHubWebhook = async (repoUrl, githubToken) => {
+  try {
+    // Extract owner and repo from URL
+    const repoMatch = repoUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+    if (!repoMatch) {
+      console.error('Invalid GitHub URL');
+      return { success: false, error: 'Invalid repository URL' };
+    }
+
+    const repoOwner = repoMatch[1];
+    const repoName = repoMatch[2].replace('.git', '');
+
+    // Get auth token
+    const token = await auth().currentUser.getIdToken();
+
+    // Call your Cloud Function to set up the webhook
+    const response = await fetch(
+      'https://setupgithubwebhook-6w4vuwvwaq-uc.a.run.app',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          repoOwner,
+          repoName,
+          githubToken
+        })
+      }
+    );
+
+    const result = await response.json();
+    return result;
+  } catch (error) {
+    console.error('Error setting up webhook:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+
+
   // Create collaboration project
   // Fixed createCollaborationProject function with proper authentication
 
 const createCollaborationProject = async () => {
-  // CRITICAL: Ensure we have the current user and they're authenticated
   const currentUser = auth().currentUser;
   if (!currentUser) {
     Alert.alert('Authentication Required', 'Please sign in to create a project');
     return;
   }
 
-  // Check GitHub connection status
   const status = await getGitHubStatus(currentUser.uid);
   if (!status.connected) {
     Alert.alert('GitHub Required', 'Please connect your GitHub account to create a project');
@@ -228,7 +272,6 @@ const createCollaborationProject = async () => {
     return;
   }
 
-  // Validate GitHub repo URL format
   const repoMatch = githubRepo.match(/github\.com\/([^\/]+)\/([^\/]+)/);
   if (!repoMatch) {
     Alert.alert('Error', 'Invalid GitHub repository URL. Format: https://github.com/owner/repo');
@@ -243,11 +286,8 @@ const createCollaborationProject = async () => {
   setCreatingProject(true);
 
   try {
-    // CRITICAL FIX: Ensure authentication token is refreshed and valid
-    await currentUser.getIdToken(true); // Force token refresh
+    await currentUser.getIdToken(true);
     
-    // Call the Cloud Function with proper authentication
-    // The Firebase SDK will automatically attach the auth token
     const validateRepo = functions().httpsCallable('validateGitHubRepo');
     
     let validation;
@@ -256,7 +296,6 @@ const createCollaborationProject = async () => {
     } catch (functionError) {
       console.error('Cloud Function Error:', functionError);
       
-      // Better error handling
       if (functionError.code === 'unauthenticated') {
         Alert.alert(
           'Authentication Error',
@@ -319,6 +358,56 @@ const createCollaborationProject = async () => {
 
     await projectRef.set(projectData);
 
+    // // Send creation notification to chat
+    // await sendProjectUpdateNotification(
+    //   groupchat.id,
+    //   displayName,
+    //   'created',
+    //   projectTitle.trim()
+    // );
+
+    // Set up GitHub webhook for repository notifications
+    try {
+      // Get user's GitHub token
+      const userDoc = await Firestore().collection('users').doc(currentUser.uid).get();
+      const githubToken = userDoc.data()?.githubAccessToken;
+
+      if (githubToken) {
+        const webhookResult = await setupGitHubWebhook(githubRepo.trim(), githubToken);
+        
+        if (webhookResult.success) {
+          console.log('✅ GitHub webhook set up successfully');
+          
+          // Store webhook ID in project data
+          await projectRef.update({
+            githubWebhookId: webhookResult.webhookId,
+            webhookSetupAt: Firestore.FieldValue.serverTimestamp()
+          });
+
+          // Send notification to chat
+          await Firestore().collection('chats')
+            .doc(groupchat.id)
+            .collection('messages')
+            .add({
+              text: '🔔 GitHub notifications enabled! You\'ll receive updates when changes are made to the repository.',
+              createdAt: Firestore.FieldValue.serverTimestamp(),
+              senderId: 'system',
+              isSystemMessage: true,
+              type: 'github_webhook_setup',
+              metadata: {
+                projectTitle: projectTitle.trim()
+              }
+            });
+        } else {
+          console.warn('⚠️ Could not set up GitHub webhook:', webhookResult.error);
+          // Don't fail the project creation, just log the warning
+        }
+      }
+    } catch (webhookError) {
+      console.error('Error setting up webhook:', webhookError);
+      // Continue anyway - webhook setup is optional
+    }
+
     // Send notifications to selected collaborators
     const notificationPromises = selectedCollaborators.map(async (userId) => {
       await Firestore().collection('notifications').add({
@@ -344,7 +433,7 @@ const createCollaborationProject = async () => {
       'Collaboration project created! Invitations have been sent to all collaborators.'
     );
     closeCollaborationModal();
-    fetchCollaborationProjects(); // Refresh the list
+    fetchCollaborationProjects();
   } catch (error) {
     console.error('Error creating project:', error);
     Alert.alert('Error', error.message || 'Failed to create collaboration project');
@@ -633,9 +722,9 @@ const createCollaborationProject = async () => {
         setAvatarUrl(defaultProfile.avatar);
       }
 
-      if (activeTab === 'questions') {
-        fetchUserQuestions(viewedUserId);
-      }
+      // if (activeTab === 'questions') {
+      //   fetchUserQuestions(viewedUserId);
+      // }
     } catch (error) {
       
       Alert.alert('Error', 'Failed to load profile data.');
@@ -700,6 +789,7 @@ const createCollaborationProject = async () => {
           location: '',
           website: '',
           joinedDate: new Date().toLocaleDateString(),
+          isPrivate: false,
           createdAt: Firestore.FieldValue.serverTimestamp(),
           updatedAt: Firestore.FieldValue.serverTimestamp()
         };
@@ -1014,6 +1104,36 @@ if(!haspermission){
     );
   };
 
+  const deleteprojects = async (projectId,projectTitle)=>{
+    Alert.alert(
+      'Delete this project',
+      `Are you sure you want to delete "${projectTitle}"?`,
+      [
+        {text:'cancel',style:'cancel'},
+        {
+          text:'Delete',
+          style:'destructive',
+          onPress:async()=>{
+            setDeletingProject(true);
+            try{
+              await Firestore().collection('collaborations').doc(projectId).delete();
+              setCollaborationProjects(prev=>prev.filter(p=>p.id!==projectId));
+              Alert.alert('Deleted','Project has been deleted.');
+            }catch(error){
+              Alert.alert('Error','Could not delete project. Please try again.');
+            }finally{
+              setDeletingProject(false);
+            }
+
+          }
+        }
+      
+      ]
+      
+    )
+  }
+
+
   const renderTabContent = () => {
     if (!canViewContent) {
       return (
@@ -1222,6 +1342,7 @@ if(!haspermission){
                     activeOpacity={0.8}
                   >
                     <View style={styles.cardHeader}>
+                       <View style={styles.projectTitleContainer}>
                       <Text style={styles.cardTitle} numberOfLines={1}>{project.title}</Text>
                       {isCompleted && (
                         <View style={styles.statusTagCompleted}>
@@ -1238,6 +1359,18 @@ if(!haspermission){
                           <Text style={styles.statusTagTextPending}>Pending</Text>
                         </View>
                       )}
+                    </View>
+                    {isCurrentUserCreator && (
+                      <TouchableOpacity
+                      onPress={(e)=>{
+                        e.stopPropagation();
+                        deleteprojects(project.id,project.title)
+                      }}
+                      style={styles.deleteprojectbutton}
+                      >
+                        <Icon name="trash-outline" size={20} color="#ff4444" />
+                        </TouchableOpacity>
+                    )}
                     </View>
                     <Text style={styles.cardAbout} numberOfLines={3}>
                       {project.about}
@@ -2834,6 +2967,19 @@ roleTagParticipant: {
     fontSize: 16,
     fontWeight: '600',
     marginRight: 8,
+  },
+   projectTitleContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    marginRight: 8,
+  },
+  deleteProjectButton: {
+    padding: 8,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255, 68, 68, 0.1)',
+    alignSelf: 'flex-start',
   },
   creatorBadge: {
     flexDirection: 'row',

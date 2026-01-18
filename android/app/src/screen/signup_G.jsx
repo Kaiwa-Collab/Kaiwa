@@ -18,7 +18,7 @@ const getStatusBarHeight = () => {
 
 
 
-const signup_G = () => {
+const signUp_G = () => {
   useEffect(()=>{
     GoogleSignin.configure({
   webClientId: '686349209176-7mlrurvferkssq874oncl4dkk3ajpp0e.apps.googleusercontent.com',
@@ -240,7 +240,7 @@ return(
 
 
 
-export default signup_G
+export default signUp_G
 
 const styles = StyleSheet.create({
  outerContainer: {

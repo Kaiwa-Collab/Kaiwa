@@ -1,5 +1,5 @@
-import { StyleSheet, Text, TouchableOpacity, View, Alert, Modal,StatusBar, ActivityIndicator } from 'react-native';
-import React, { useState } from 'react';
+import { StyleSheet, Text, TouchableOpacity, View, Alert, Modal,StatusBar, ActivityIndicator, Switch } from 'react-native';
+import React, { useState, useEffect } from 'react';
 import auth from '@react-native-firebase/auth'; 
 import firestore from '@react-native-firebase/firestore';
 import storage from '@react-native-firebase/storage';
@@ -12,6 +12,26 @@ const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHe
 const Settings = () => {
   const navigation = useNavigation();
   const [loading, setLoading] = useState(false);
+  const [isPrivate, setIsPrivate] = useState(false);
+
+  useEffect(() => {
+    const loadPrivacySetting = async () => {
+      try {
+        const currentUser = auth().currentUser;
+        if (currentUser) {
+          const profileDoc = await firestore().collection('profile').doc(currentUser.uid).get();
+          if (profileDoc.exists) {
+            const data = profileDoc.data();
+            setIsPrivate(data.isPrivate || false);
+          }
+        }
+      } catch (error) {
+        console.error('Error loading privacy setting:', error);
+      }
+    };
+
+    loadPrivacySetting();
+  }, []);
   
 
 
@@ -243,6 +263,26 @@ const Settings = () => {
     navigation.goBack();
   };
 
+  const togglePrivacy = async (value) => {
+    try {
+      const currentUser = auth().currentUser;
+      if (currentUser) {
+        await firestore()
+          .collection('profile')
+          .doc(currentUser.uid)
+          .update({
+            isPrivate: value,
+            updatedAt: firestore.FieldValue.serverTimestamp()
+          });
+        setIsPrivate(value);
+        Alert.alert('Success', `Account is now ${value ? 'private' : 'public'}`);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to update privacy setting');
+      console.error('Error updating privacy:', error);
+    }
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.statusBarSpacer}></View>
@@ -262,11 +302,28 @@ const Settings = () => {
           <Text style={styles.loadingText}>Deleting account...</Text>
         </View>
       </Modal>
+
+       <View style={styles.privacyContainer}>
+        <View style={styles.privacyTextContainer}>
+          <Text style={styles.privacyTitle}>Private Account</Text>
+          <Text style={styles.privacyDescription}>
+            When your account is private, only people you approve can see your posts and profile
+          </Text>
+        </View>
+        <Switch
+          value={isPrivate}
+          onValueChange={togglePrivacy}
+          trackColor={{ false: '#767577', true: '#34C759' }}
+          thumbColor={isPrivate ? '#ffffff' : '#f4f3f4'}
+        />
+      </View>
       
       <TouchableOpacity
       onPress={()=>navigation.navigate('Addbio')} style={styles.Addbio}>
         <Text style={styles.AddbiotextText}>Add Bio</Text>
       </TouchableOpacity>
+      
+     
       
       <TouchableOpacity
         onPress={() => navigation.navigate('FollowersFollowing')} 
@@ -302,13 +359,13 @@ export default Settings;
 const styles = StyleSheet.create({
 
 backButton: {
-    paddingVertical: 15,
+    paddingVertical: 25,
     position: 'absolute',
     left: 20, 
   },
   backButtonText: {
     color: 'white',
-    fontSize: 30,
+    fontSize: 35,
   },
 
   container: { flex: 1, 
@@ -439,5 +496,37 @@ backButton: {
   statusBarSpacer: {
     height: getStatusBarHeight(),
     backgroundColor: '#1e1e1e'
+  },
+  privacyContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginTop: 4,
+    backgroundColor: '#333',
+    padding: 15,
+    borderRadius: 1,
+    borderWidth: 1,
+    borderBottomColor: 'white',
+    shadowColor: 'white',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 1,
+    shadowRadius: 1,
+    elevation: 1.5,
+  },
+  privacyTextContainer: {
+    flex: 1,
+    marginRight: 15,
+  },
+  privacyTitle: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 16,
+    marginBottom: 4,
+  },
+  privacyDescription: {
+    color: '#ccc',
+    fontSize: 14,
+    lineHeight: 20,
   },
 });

@@ -373,7 +373,7 @@ const HomeScreen = () => {
 
       <Text style={styles.text4}>
         don't have an account?</Text>
-      <TouchableOpacity style={styles.Pressable1} onPress={()=>navigation.navigate('signup_G')}>
+      <TouchableOpacity style={styles.Pressable1} onPress={()=>navigation.navigate('signUp_G')}>
         <Text style={styles.text5}>
          Sign up
         </Text>

@@ -4,7 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'react-native'; // Added StatusBar import
 import auth from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
-import signup_G from './signup_G';
+import signUp_G from './signUp_G';
 import presenceService from './presenceService';
 
 import HomeScreen from './HomeScreen';
@@ -79,7 +79,7 @@ function AppNavigator({ user, hasUsername }) {
         <>
           <Stack.Screen name="Home" component={HomeScreen} />
           <Stack.Screen name="SignUp" component={SignUp} />
-          <Stack.Screen name="signup_G" component={signup_G} />
+          <Stack.Screen name="signUp_G" component={signUp_G} />
           <Stack.Screen name="Username" component={Username} />
         </>
       )}
