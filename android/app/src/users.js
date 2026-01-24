@@ -4,6 +4,7 @@ import Firestore from '@react-native-firebase/firestore';
 import { getAuth, onAuthStateChanged } from '@react-native-firebase/auth';
 import RNFS from 'react-native-fs';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import functions from '@react-native-firebase/functions';
 
 const UserDataContext = createContext();
 
@@ -350,198 +351,104 @@ export const UserProvider = ({ children }) => {
 
     try {
       // Get following IDs
-      const followingRef = collection(doc(collection(db, 'profile'), currentUser.uid), 'following');
-      const followingSnap = await getDocs(followingRef);
-      const followingIds = followingSnap.docs.map(doc => doc.id);
+      const followingRef = functions().httpsCallable('getFollowingpost');
+      const followingSnap = await followingRef({
+        type:'questions',
+        limit:50
 
-      if (followingIds.length === 0) {
-        setFollowingQuestions([]);
-        await clearQuestionsCache();
-        return;
-      }
-
-      // Split into chunks of 10 (Firestore 'in' limit)
-      const chunks = [];
-      for (let i = 0; i < followingIds.length; i += 10) {
-        chunks.push(followingIds.slice(i, i + 10));
-      }
-
-      // Fetch all chunks in parallel
-      const questionsPromises = chunks.map(ids =>
-        getDocs(query(
-          collection(db, 'questions'),
-          where('authorId', 'in', ids),
-          orderBy('timestamp', 'desc'),
-          limit(20) // Limit per chunk to improve performance
-        ))
-      );
-
-      const snapshots = await Promise.all(questionsPromises);
-
-      // Combine and deduplicate
-      const allQuestions = snapshots.flatMap(snapshot =>
-        snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data(),
-          createdAt: doc.data().createdAt || doc.data().timestamp || new Date(),
-        }))
-      );
-
-      // Remove duplicates
-      const uniqueQuestions = Array.from(
-        new Map(allQuestions.map(q => [q.id, q])).values()
-      );
-
-      // Sort by date
-      uniqueQuestions.sort((a, b) => {
-        const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
-        const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);
-        return dateB - dateA;
       });
 
-      setFollowingQuestions(uniqueQuestions);
-      await saveQuestionsToCache(uniqueQuestions);
-      lastQuestionsFetch.current = Date.now();
+      const questions=followingSnap.data.items.map(q=>({
+        ...q,
+        createdAt: new Date(q.createdAt),
+        timestamp: new Date(q.timestamp)
+      }));
 
-      // Cache images in background
-      uniqueQuestions.forEach(q => {
-        if (q.imageUrl) setTimeout(() => cacheImage(q.imageUrl), 100);
-        if (q.userAvatar || q.avatar) setTimeout(() => cacheImage(q.userAvatar || q.avatar), 100);
-      });
+       setFollowingQuestions(questions);
+    await saveQuestionsToCache(questions);
+    lastQuestionsFetch.current = Date.now();
 
-    } catch (error) {
-      console.error('Error fetching following questions:', error);
-      setFollowingQuestions([]);
-    } finally {
-      isFetchingQuestions.current = false;
-    }
-  };
+ // Cache images in background
+    questions.forEach(q => {
+      if (q.imageUrl) setTimeout(() => cacheImage(q.imageUrl), 100);
+      if (q.userAvatar || q.userImage) setTimeout(() => cacheImage(q.userAvatar || q.userImage), 100);
+    });
 
-  const fetchFollowingPostsOptimized = async (useCache = true) => {
-    if (!currentUser || isFetchingPosts.current) return;
+  } catch (error) {
+    console.error('Error fetching following questions:', error);
+    setFollowingQuestions([]);
+  } finally {
+    isFetchingQuestions.current = false;
+  }
+};
 
-    // Try cache first
-    if (useCache) {
-      const cached = await loadPostsFromCache();
-      if (cached && cached.length > 0) {
-        setFollowingPosts(cached);
-        
-        // Check if we should refresh in background
-        if (shouldFetchFresh(lastPostsFetch.current, CACHE_DURATION.POSTS)) {
-          setTimeout(() => fetchFollowingPostsOptimized(false), 1000);
-        }
-        return;
+
+ const fetchFollowingPostsOptimized = async (useCache = true) => {
+  if (!currentUser || isFetchingPosts.current) return;
+
+  // Try cache first
+  if (useCache) {
+    const cached = await loadPostsFromCache();
+    if (cached && cached.length > 0) {
+      setFollowingPosts(cached);
+      
+      if (shouldFetchFresh(lastPostsFetch.current, CACHE_DURATION.POSTS)) {
+        setTimeout(() => fetchFollowingPostsOptimized(false), 1000);
       }
+      return;
     }
+  }
 
-    isFetchingPosts.current = true;
+  isFetchingPosts.current = true;
 
-    try {
-      const followingRef = collection(doc(collection(db, 'profile'), currentUser.uid), 'following');
-      const followingSnap = await getDocs(followingRef);
-      const followingIds = followingSnap.docs.map(doc => doc.id);
+  try {
+    // Call Cloud Function
+    const getFollowingpost = functions().httpsCallable('getFollowingpost');
+    const result = await getFollowingpost({ 
+      type: 'posts',
+      limit: 30 
+    });
+    
+    const posts = result.data.items.map(p => ({
+      ...p,
+      createdAt: new Date(p.createdAt),
+      timestamp: new Date(p.timestamp)
+    }));
 
-      if (followingIds.length === 0) {
-        setFollowingPosts([]);
-        return;
-      }
+    setFollowingPosts(posts);
+    await savePostsToCache(posts);
+    lastPostsFetch.current = Date.now();
 
-      // Split into chunks
-      const chunks = [];
-      for (let i = 0; i < followingIds.length; i += 10) {
-        chunks.push(followingIds.slice(i, i + 10));
-      }
+    // Cache images in background
+    posts.forEach(post => {
+      if (post.imageUrl) setTimeout(() => cacheImage(post.imageUrl), 100);
+      if (post.userImage) setTimeout(() => cacheImage(post.userImage), 100);
+    });
 
-      // Fetch all chunks in parallel
-      const postsPromises = chunks.map(ids =>
-        getDocs(query(
-          collection(db, 'posts'),
-          where('userId', 'in', ids),
-          limit(30) // Limit per chunk
-        ))
-      );
-
-      const snapshots = await Promise.all(postsPromises);
-
-      // Combine results
-      const allPosts = snapshots.flatMap(snapshot =>
-        snapshot.docs.map(doc => ({
-          id: doc.id,
-          postId: doc.id,
-          ...doc.data(),
-          createdAt: doc.data().createdAt || doc.data().timestamp || new Date(),
-        }))
-      );
-
-      // Sort by date
-      allPosts.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-      setFollowingPosts(allPosts);
-      await savePostsToCache(allPosts);
-      lastPostsFetch.current = Date.now();
-
-      // Cache images in background
-      allPosts.forEach(post => {
-        if (post.imageUrl) setTimeout(() => cacheImage(post.imageUrl), 100);
-        if (post.userImage) setTimeout(() => cacheImage(post.userImage), 100);
-      });
-
-    } catch (error) {
-      console.error('Error fetching following posts:', error);
-      setFollowingPosts([]);
-    } finally {
-      isFetchingPosts.current = false;
-    }
-  };
+  } catch (error) {
+    console.error('Error fetching following posts:', error);
+    setFollowingPosts([]);
+  } finally {
+    isFetchingPosts.current = false;
+  }
+};
 
   const fetchTrendingQuestions = async () => {
-    try {
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      
-      const questionsSnapshot = await Firestore()
-        .collection('questions')
-        .where('timestamp', '>=', thirtyDaysAgo)
-        .orderBy('timestamp', 'desc')
-        .limit(100)
-        .get();
-      
-      const questions = questionsSnapshot.docs.map(doc => {
-        const data = doc.data();
-        const timestamp = data.timestamp?.toDate ? data.timestamp.toDate() : (data.timestamp instanceof Date ? data.timestamp : new Date());
-        const ageInDays = (new Date() - timestamp) / (1000 * 60 * 60 * 24);
-        
-        const decayFactor = 1 / (1 + ageInDays / 7);
-        const trendingScore = (data.likes || 0) * decayFactor;
-        
-        return {
-          id: doc.id,
-          title: data.title,
-          content: data.content,
-          username: data.username,
-          userImage: data.userImage,
-          timestamp: timestamp,
-          createdAt: data.createdAt || data.timestamp || timestamp,
-          answers: data.answers || [],
-          tags: data.tags || [],
-          authorId: data.authorId,
-          likes: data.likes || 0,
-          likedBy: data.likedBy || [],
-          imageUrl: data.imageUrl || null,
-          trendingScore: trendingScore
-        };
-      });
-      
-      return questions
-        .sort((a, b) => b.trendingScore - a.trendingScore)
-        .slice(0, 10);
-        
-    } catch (error) {
-      console.error('Error fetching trending questions:', error);
-      return [];
-    }
-  };
-
+  try {
+    const getTrendingQuestions = functions().httpsCallable('getTrendingQuestions');
+    const result = await getTrendingQuestions();
+    
+    // Convert timestamp strings back to Date objects
+    return result.data.map(q => ({
+      ...q,
+      timestamp: new Date(q.timestamp),
+      createdAt: new Date(q.timestamp)
+    }));
+  } catch (error) {
+    console.error('Error fetching trending questions:', error);
+    return [];
+  }
+};
   // ============================================================================
   // PROGRESSIVE DATA LOADING
   // ============================================================================

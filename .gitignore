@@ -22,6 +22,7 @@ android/app/google-services.json
 android/app/src/config/
 PRESENCE_FIX_SUMMARY.md
 WRITE_OPTIMIZATION_ANALYSIS.md
+FUNCTION_READ_COUNT_ANALYSIS
 
 # iOS
 ios/Pods/

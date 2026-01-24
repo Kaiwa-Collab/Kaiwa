@@ -23,6 +23,7 @@ import firestore from '@react-native-firebase/firestore';
 import chatService from './chatService';
 import auth from '@react-native-firebase/auth';
 import presenceService from './presenceService';
+import functions from '@react-native-firebase/functions';
 
 
 const Drawer = createDrawerNavigator();
@@ -94,446 +95,73 @@ function CustomDrawerContent({ navigation }) {
   } = useUserData();
 
   // Enhanced error handling for conversations loading
- const loadActiveConversations = () => {
-  const currentUserId = currentUser?.uid || auth().currentUser?.uid;
-  if (!currentUserId) {
-    console.log('[First.jsx] No currentUserId available');
+ const loadActiveConversations = async () => {
+  try {
+    const currentUserId = currentUser?.uid || auth().currentUser?.uid;
+    if (!currentUserId) {
+      console.log('[First.jsx] No current user, skipping load');
+      return;
+    }
+
+    console.log('[First.jsx] Starting to load conversations for user:', currentUserId);
+    setLoading(true);
+
+    const result = await functions()
+      .httpsCallable('getUserConversations')();
+
+    console.log('[First.jsx] Raw result from Cloud Function:', JSON.stringify(result.data, null, 2));
+
+    const {
+      conversations = [],
+      messageRequests = { received: [], sent: [] },
+      cached
+    } = result.data || {};
+
+    console.log('[First.jsx] Parsed data:', {
+      conversationsCount: conversations.length,
+      receivedRequestsCount: messageRequests.received?.length || 0,
+      sentRequestsCount: messageRequests.sent?.length || 0,
+      cached,
+      sampleConversation: conversations[0] || null
+    });
+
+    setActiveConversations(conversations);
+    setReceivedRequests(messageRequests.received || []);
+    setPendingRequests(messageRequests.sent || []);
+
+    console.log('[First.jsx] State updated successfully');
+
+  } catch (error) {
+    console.error('[First.jsx] Failed to load conversations:', error);
+    console.error('[First.jsx] Error details:', error.message, error.code);
+    Alert.alert(
+      'Error',
+      'Could not load conversations. Please try again.'
+    );
+  } finally {
     setLoading(false);
     setIsInitialLoad(false);
-    return () => {}; // Return empty cleanup function
   }
-
-  console.log('[First.jsx] Loading conversations for user:', currentUserId);
-  setLoading(true);
-
-  // Create real-time listener for chats collection
-  const unsubscribe = firestore()
-    .collection('chats')
-    .where('participants', 'array-contains', currentUserId)
-    .onSnapshot(
-      async (chatsSnapshot) => {
-        try {
-          console.log('[First.jsx] onSnapshot triggered, docs count:', chatsSnapshot.docs.length);
-          
-          // If query returns empty, get all chats and filter manually
-          // (in case participants field is missing from some documents)
-          let chatsToProcess = chatsSnapshot.docs;
-          
-          if (chatsSnapshot.empty) {
-            console.log('[First.jsx] Participants query empty, getting all chats and filtering...');
-            const allChatsSnapshot = await firestore()
-              .collection('chats')
-              .get();
-            
-            console.log('[First.jsx] Total chats in database:', allChatsSnapshot.docs.length);
-            
-            // Filter chats where user is a participant (check participants field or extract from ID)
-            const filteredChats = [];
-            for (const chatDoc of allChatsSnapshot.docs) {
-              const chatData = chatDoc.data();
-              const chatId = chatDoc.id;
-              let isParticipant = false;
-              let participants = chatData.participants;
-              
-              // Check if participants array contains current user
-              if (participants && Array.isArray(participants)) {
-                isParticipant = participants.includes(currentUserId);
-              } else {
-                // If no participants field, try to extract from chat ID
-                // Chat ID pattern: userId1_userId2 or similar
-                if (chatId.includes('_') && !chatId.startsWith('group_')) {
-                  const possibleUserIds = chatId.split('_').filter(id => id && id.length > 10);
-                  isParticipant = possibleUserIds.includes(currentUserId);
-                  
-                  // CRITICAL FIX: Don't update inside onSnapshot callback to avoid write loops
-                  // Instead, queue the update to be done outside the listener
-                  // This prevents the listener from triggering itself repeatedly
-                  if (isParticipant && possibleUserIds.length >= 2) {
-                    // Use a flag to track if we've already queued this update
-                    // Store in a Set to avoid duplicate updates
-                    const updateKey = `chat_update_${chatId}`;
-                    if (!queuedChatUpdatesRef.current.has(updateKey)) {
-                      queuedChatUpdatesRef.current.add(updateKey);
-                      // Schedule update outside the listener callback
-                      setTimeout(async () => {
-                        try {
-                          // Double-check the document still needs updating
-                          const chatDoc = await firestore().collection('chats').doc(chatId).get();
-                          const chatData = chatDoc.data();
-                          if (!chatData?.participants || !Array.isArray(chatData.participants) || chatData.participants.length === 0) {
-                            await firestore().collection('chats').doc(chatId).update({
-                              participants: possibleUserIds,
-                              isActive: true,
-                              type: 'direct',
-                              updatedAt: firestore.FieldValue.serverTimestamp()
-                            });
-                            console.log('[First.jsx] Updated chat', chatId, 'with participants:', possibleUserIds);
-                          }
-                        } catch (updateError) {
-                          console.log('[First.jsx] Error updating chat participants:', updateError.message);
-                        } finally {
-                          queuedChatUpdatesRef.current.delete(updateKey);
-                        }
-                      }, 1000); // Delay to avoid write loops
-                    }
-                  }
-                } else {
-                  // Check if current user ID is in the chat ID string
-                  isParticipant = chatId.includes(currentUserId);
-                }
-              }
-              
-              if (isParticipant) {
-                filteredChats.push(chatDoc);
-              }
-            }
-            
-            console.log('[First.jsx] Filtered chats for user:', filteredChats.length);
-            chatsToProcess = filteredChats;
-          }
-          
-          if (chatsToProcess.length === 0) {
-            console.log('[First.jsx] No chats found for user');
-            setActiveConversations([]);
-            setLoading(false);
-            if (isInitialLoad) {
-              setIsInitialLoad(false);
-            }
-            return;
-          }
-          
-          // Process chats directly
-          try {
-              // First try with participants field
-              let chatsSnapshot = await firestore()
-                .collection('chats')
-                .where('participants', 'array-contains', currentUserId)
-                .get();
-              
-              console.log('[First.jsx] Participants query returned:', chatsSnapshot.docs.length, 'chats');
-              
-              // If that returns empty, get all chats and filter manually
-              // (in case participants field is missing from some documents)
-              if (chatsSnapshot.empty) {
-                console.log('[First.jsx] Participants query empty, getting all chats and filtering...');
-                const allChatsSnapshot = await firestore()
-                  .collection('chats')
-                  .get();
-                
-                console.log('[First.jsx] Total chats in database:', allChatsSnapshot.docs.length);
-                
-                // Filter chats where user is a participant (check participants field or extract from ID)
-                const filteredChats = [];
-                for (const chatDoc of allChatsSnapshot.docs) {
-                  const chatData = chatDoc.data();
-                  const chatId = chatDoc.id;
-                  let isParticipant = false;
-                  let participants = chatData.participants;
-                  
-                  // Check if participants array contains current user
-                  if (participants && Array.isArray(participants)) {
-                    isParticipant = participants.includes(currentUserId);
-                  } else {
-                    // If no participants field, try to extract from chat ID
-                    // Chat ID pattern: userId1_userId2 or similar
-                    if (chatId.includes('_') && !chatId.startsWith('group_')) {
-                      const possibleUserIds = chatId.split('_').filter(id => id && id.length > 10);
-                      isParticipant = possibleUserIds.includes(currentUserId);
-                      
-                      // CRITICAL FIX: Don't update inside onSnapshot callback to avoid write loops
-                      // Queue the update to be done outside the listener
-                      if (isParticipant && possibleUserIds.length >= 2) {
-                        const updateKey = `chat_update_${chatId}`;
-                        if (!queuedChatUpdatesRef.current.has(updateKey)) {
-                          queuedChatUpdatesRef.current.add(updateKey);
-                          setTimeout(async () => {
-                            try {
-                              const chatDoc = await firestore().collection('chats').doc(chatId).get();
-                              const chatData = chatDoc.data();
-                              if (!chatData?.participants || !Array.isArray(chatData.participants) || chatData.participants.length === 0) {
-                                await firestore().collection('chats').doc(chatId).update({
-                                  participants: possibleUserIds,
-                                  isActive: true,
-                                  type: 'direct',
-                                  updatedAt: firestore.FieldValue.serverTimestamp()
-                                });
-                                console.log('[First.jsx] Updated chat', chatId, 'with participants:', possibleUserIds);
-                              }
-                            } catch (updateError) {
-                              console.log('[First.jsx] Error updating chat participants:', updateError.message);
-                            } finally {
-                              queuedChatUpdatesRef.current.delete(updateKey);
-                            }
-                          }, 1000);
-                        }
-                      }
-                    } else {
-                      // Check if current user ID is in the chat ID string
-                      isParticipant = chatId.includes(currentUserId);
-                    }
-                  }
-                  
-                  if (isParticipant) {
-                    filteredChats.push(chatDoc);
-                  }
-                }
-                
-                console.log('[First.jsx] Filtered chats for user:', filteredChats.length);
-                
-                // Create a new snapshot-like structure
-                chatsSnapshot = {
-                  docs: filteredChats,
-                  empty: filteredChats.length === 0
-                };
-              }
-              
-              if (chatsSnapshot.empty) {
-                console.log('[First.jsx] No chats found for user');
-                setActiveConversations([]);
-                setLoading(false);
-                if (isInitialLoad) {
-                  setIsInitialLoad(false);
-                }
-                return;
-              }
-              
-              // Process chats directly
-              const conversations = [];
-              for (const chatDoc of chatsSnapshot.docs) {
-                const chatData = chatDoc.data();
-                const chatId = chatDoc.id;
-                const chatType = chatData.type || 'direct';
-                
-               
-                
-                // Skip inactive chats
-                if (chatData.isActive === false) {
-                 
-                  continue;
-                }
-                
-                let conversationItem;
-                
-                // Handle group chats differently from direct chats
-                if (chatType === 'group') {
-                  // For group chats, use chatId as the unique identifier
-                  conversationItem = {
-                    id: chatId, // Use chatId for groups to ensure uniqueness
-                    conversationId: chatId,
-                    type: 'group',
-                    name: chatData.metadata?.name || 'Group Chat',
-                    displayName: chatData.metadata?.name || 'Group Chat',
-                    avatar: chatData.metadata?.avatar || null,
-                    username: 'group',
-                    lastMessage: chatData.lastMessage?.text || '',
-                    lastMessageTime: chatData.lastMessage?.createdAt || chatData.updatedAt || chatData.createdAt,
-                    unreadCount: 0,
-                    isPinned: false,
-                    isArchived: false,
-                    joinedAt: chatData.createdAt,
-                    participants: chatData.participants || [],
-                    participantsInfo: chatData.participantsInfo || {}
-                  };
-                } else {
-                  // Handle direct chats - find other participant
-                  let participants = chatData.participants;
-                  if (!participants || !Array.isArray(participants) || participants.length === 0) {
-                   
-                    
-                    // Try to extract participants from chat ID (common pattern: userId1_userId2)
-                    if (chatId.includes('_') && !chatId.startsWith('group_')) {
-                      const possibleUserIds = chatId.split('_');
-                      participants = possibleUserIds.filter(id => id && id.length > 10); // Filter out short IDs
-                     
-                      
-                      // CRITICAL FIX: Don't update inside onSnapshot callback to avoid write loops
-                      // Queue the update to be done outside the listener
-                      const updateKey = `chat_update_${chatId}`;
-                      if (!queuedChatUpdatesRef.current.has(updateKey)) {
-                        queuedChatUpdatesRef.current.add(updateKey);
-                        setTimeout(async () => {
-                          try {
-                            const chatDoc = await firestore().collection('chats').doc(chatId).get();
-                            const chatData = chatDoc.data();
-                            if (!chatData?.participants || !Array.isArray(chatData.participants) || chatData.participants.length === 0) {
-                              await firestore().collection('chats').doc(chatId).update({
-                                participants: participants,
-                                isActive: true,
-                                type: 'direct',
-                                updatedAt: firestore.FieldValue.serverTimestamp()
-                              });
-                            }
-                          } catch (updateError) {
-                            // Error updating chat participants
-                          } finally {
-                            queuedChatUpdatesRef.current.delete(updateKey);
-                          }
-                        }, 1000);
-                      }
-                    } else {
-                     
-                      continue;
-                    }
-                  }
-                  
-                  const otherParticipantId = participants.find(id => id !== currentUserId);
-                  if (!otherParticipantId) {
-                   
-                    continue;
-                  }
-                  
-                  let participantInfo = chatData.participantsInfo?.[otherParticipantId];
-                  
-                  if (!participantInfo || !participantInfo.name) {
-                    try {
-                      const userDoc = await firestore()
-                        .collection('profile')
-                        .doc(otherParticipantId)
-                        .get();
-                      
-                      if (userDoc.exists) {
-                        const userData = userDoc.data();
-                        participantInfo = {
-                          id: otherParticipantId,
-                          name: userData.name || userData.displayName || userData.username || 'Unknown User',
-                          displayName: userData.displayName || userData.name || userData.username || 'Unknown User',
-                          avatar: userData.avatar || userData.photoURL || null,
-                          username: userData.username || 'unknown'
-                        };
-                      } else {
-                        participantInfo = {
-                          id: otherParticipantId,
-                          name: 'Unknown User',
-                          displayName: 'Unknown User',
-                          avatar: null,
-                          username: 'unknown'
-                        };
-                      }
-                    } catch (profileError) {
-                      participantInfo = {
-                        id: otherParticipantId,
-                        name: 'Unknown User',
-                        displayName: 'Unknown User',
-                        avatar: null,
-                        username: 'unknown'
-                      };
-                    }
-                  }
-                  
-                  // For direct chats, use conversationId as unique identifier to avoid duplicates
-                  conversationItem = {
-                    id: `direct_${chatId}`, // Prefix with direct_ to ensure uniqueness
-                    conversationId: chatId,
-                    type: 'direct',
-                    ...participantInfo,
-                    lastMessage: chatData.lastMessage?.text || '',
-                    lastMessageTime: chatData.lastMessage?.createdAt || chatData.updatedAt || chatData.createdAt,
-                    unreadCount: 0,
-                    isPinned: false,
-                    isArchived: false,
-                    joinedAt: chatData.createdAt
-                  };
-                }
-                
-                conversations.push(conversationItem);
-              }
-              
-              conversations.sort((a, b) => {
-                const aTime = a.lastMessageTime?.toDate ? a.lastMessageTime.toDate() : new Date(0);
-                const bTime = b.lastMessageTime?.toDate ? b.lastMessageTime.toDate() : new Date(0);
-                return bTime - aTime;
-              });
-              
-              // Only update if conversations actually changed
-              console.log('[First.jsx] Processed', conversations.length, 'conversations from chats collection');
-              if (!arraysEqual(conversations, prevConversationsRef.current)) {
-                prevConversationsRef.current = conversations;
-                setActiveConversations(conversations);
-                console.log('[First.jsx] Updated activeConversations with', conversations.length, 'items');
-              }
-              // Always end loading
-              setLoading(false);
-              if (isInitialLoad) {
-                setIsInitialLoad(false);
-              }
-            } catch (processingError) {
-              console.error('[First.jsx] Error processing chats:', processingError);
-              setActiveConversations([]);
-              setLoading(false);
-              if (isInitialLoad) {
-                setIsInitialLoad(false);
-              }
-            }
-
-        } catch (error) {
-          console.error('[First.jsx] Error in onSnapshot callback:', error);
-          // Always end loading on error
-          setLoading(false);
-          if (isInitialLoad) {
-            setIsInitialLoad(false);
-          }
-          
-          // Don't show alert on first load failure, just retry
-          setTimeout(() => {
-            console.log('[First.jsx] Retrying loadActiveConversations after error...');
-            loadActiveConversations();
-          }, 3000);
-        }
-      },
-      (error) => {
-        console.error('[First.jsx] onSnapshot error handler:', error);
-        // Always end loading when listener errors
-        setLoading(false);
-        if (isInitialLoad) {
-          setIsInitialLoad(false);
-        }
-        
-        // Attempt to reconnect after error
-        setTimeout(() => {
-          console.log('[First.jsx] Retrying loadActiveConversations after listener error...');
-          loadActiveConversations();
-        }, 5000);
-      }
-    );
-
-  return unsubscribe || (() => {});
-};
-
+};       
   // Set up listeners only once when component mounts
 useEffect(() => {
-  console.log('[First.jsx] useEffect triggered, currentUser?.uid:', currentUser?.uid);
-  let unsubscribeConversations = null;
-  let unsubscribeRequests = null;
-  
-  const currentUserId = currentUser?.uid || auth().currentUser?.uid;
-  if (currentUserId) {
-    console.log('[First.jsx] Setting up listeners for user:', currentUserId);
-    unsubscribeConversations = loadActiveConversations();
-    unsubscribeRequests = loadMessageRequests();
-  } else {
-    console.log('[First.jsx] No currentUserId, resetting loading state');
+  if (!currentUser?.uid) {
     setLoading(false);
     setIsInitialLoad(false);
+    return;
   }
-  
-  return () => {
-    console.log('[First.jsx] Cleaning up listeners');
-    if (unsubscribeConversations) {
-      unsubscribeConversations();
-    }
-    if (unsubscribeRequests) {
-      unsubscribeRequests();
-    }
-  };
-}, [currentUser?.uid]); // Only depend on user ID, not the entire user object
+
+  loadActiveConversations();
+}, [currentUser?.uid]);
+ // Only depend on user ID, not the entire user object
 
 // Add a function to manually refresh conversations (useful for when returning from chat)
 const refreshConversations = React.useCallback(() => {
-  if (currentUser) {
-    
+  if (!loading && currentUser) {
     loadActiveConversations();
   }
-}, [currentUser]);
+}, [currentUser, loading]);
+
 
   // Load and listen to message requests
   const loadMessageRequests = () => {
@@ -678,113 +306,30 @@ const handleRefresh = React.useCallback(() => {
 
   // Enhanced search with better validation
   const handleSearch = async (text) => {
-    setSearch(text);
-    
-    // When search is empty or less than 3 characters, show active conversations only
-    // Note: Message requests are NOT shown here - they only appear in MessageRequestsScreen
-    if (text.trim().length === 0 || text.trim().length < 3) {
-      // Clear search suggestions and show chats only (no message requests)
-      setUsers([...activeConversations]);
-      setLoading(false);
-      
-      // If no conversations are loaded yet, trigger a refresh
-      if (activeConversations.length === 0 && !loading) {
-        loadActiveConversations();
-      }
-      return;
-    }
+  setSearch(text);
 
+  if (text.trim().length < 3) {
+    setUsers(activeConversations);
+    return;
+  }
+
+  try {
     setLoading(true);
-    try {
-      // Input validation and sanitization
-      const sanitizedText = text.toLowerCase().trim().replace(/[^\w\s]/gi, '');
-      if (sanitizedText.length === 0) {
-        setUsers([]);
-        setLoading(false);
-        return;
-      }
-      
-      let querySnapshot = await firestore()
-        .collection('profile')
-        .orderBy('username')
-        .startAt(sanitizedText)
-        .endAt(sanitizedText + '\uf8ff')
-        .limit(20)
-        .get();
 
-      let usersList = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-
-      // Fallback search if no results
-      if (usersList.length === 0) {
-        const allUsersSnapshot = await firestore()
-          .collection('profile')
-          .limit(100)
-          .get();
-
-        const allUsers = allUsersSnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
-
-        usersList = allUsers.filter(user => {
-          const username = (user.username || '').toLowerCase();
-          const name = (user.name || '').toLowerCase();
-          const displayName = (user.displayName || '').toLowerCase();
-          const searchLower = sanitizedText;
-          
-          return username.includes(searchLower) || 
-                 name.includes(searchLower) ||
-                 displayName.includes(searchLower);
-        });
-      }
-      
-      const filteredUsers = usersList.filter(user => user.id !== currentUser);
-      
-      // Check mutual follow status for each user
-      const usersWithFollowStatus = await Promise.all(
-        filteredUsers.map(async (user) => {
-          try {
-            const isMutualFollow = await chatService.checkMutualFollow(currentUser.uid, user.id);
-            return {
-              ...user,
-              isMutualFollow,
-              canDM: isMutualFollow
-            };
-          } catch (error) {
-            return {
-              ...user,
-              isMutualFollow: false,
-              canDM: false
-            };
-          }
-        })
-      );
-      
-      // Sort: active conversations first, then mutual followers, then others
-      const sortedFiltered = usersWithFollowStatus.sort((a, b) => {
-        const aHasConversation = activeConversations.some(conv => conv.id === a.id);
-        const bHasConversation = activeConversations.some(conv => conv.id === b.id);
-        
-        if (aHasConversation && !bHasConversation) return -1;
-        if (!aHasConversation && bHasConversation) return 1;
-        
-        // Then sort by mutual follow status
-        if (a.isMutualFollow && !b.isMutualFollow) return -1;
-        if (!a.isMutualFollow && b.isMutualFollow) return 1;
-        
-        return 0;
+    const result = await functions()
+      .httpsCallable('searchUsers')({
+        query: text,
+        limit: 20
       });
-      
-      setUsers(sortedFiltered);
-    } catch (err) {
-      Alert.alert('Search Error', 'Could not search users. Please try again.');
-      setUsers([]);
-    }
+
+    setUsers(result.data.users || []);
+  } catch (error) {
+    Alert.alert('Search Error', 'Could not search users');
+  } finally {
     setLoading(false);
-  };
+  }
+};
+
 
   // Enhanced chat press handler with validation
   const handleChatPress = async (item) => {
@@ -1165,29 +710,24 @@ const handleRefresh = React.useCallback(() => {
   }
 
   // Show conversations when search is empty
-  return (
-    <FlatList
-      data={users}
-      keyExtractor={(item, index) => {
-        // Use unique identifier: prefer uniqueKey, then id, then conversationId, fallback to index
-        if (item.uniqueKey) return item.uniqueKey;
-        if (item.id) return item.id;
-        if (item.conversationId) return item.conversationId;
-        return `item_${index}`;
-      }}
-      renderItem={renderChatItem}
-      showsVerticalScrollIndicator={false}
-      keyboardShouldPersistTaps="handled"
-      refreshing={loading}
-     onRefresh={() => {
-  if (!loading) {
-    setLoading(true);
-    // Don't clear conversations immediately - let the listener update them
-    loadActiveConversations();
-    loadMessageRequests();
-  }
-}}
-    />
+  return(
+  <FlatList
+  data={users}
+  keyExtractor={(item, index) => {
+    if (item.uniqueKey) return item.uniqueKey;
+    if (item.id) return item.id;
+    if (item.conversationId) return item.conversationId;
+    return `item_${index}`;
+  }}
+  renderItem={renderChatItem}
+  showsVerticalScrollIndicator={false}
+  keyboardShouldPersistTaps="handled"
+  refreshing={loading}
+  onRefresh={async () => {
+    if (loading) return;
+    await loadActiveConversations(); // 🔥 server-side refresh
+  }}
+/>
   );
   };
 

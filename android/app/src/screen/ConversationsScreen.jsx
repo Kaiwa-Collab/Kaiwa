@@ -7,6 +7,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import Postskeleton from '../animations/postskeleton';
 import firestore from '@react-native-firebase/firestore';
 import Icon from 'react-native-vector-icons/Ionicons';
+import functions from '@react-native-firebase/functions';
 
 const PERMISSIONS_REQUESTED_KEY = '@permissions_requested';
 
@@ -98,18 +99,62 @@ const ConversationsScreen = () => {
     }
   }, [currentUser?.uid]);
 
-  // Check aggregated data - scheduled function handles creation automatically
+  // Trigger server-side aggregation if needed
   const initializeAggregatedData = useCallback(async () => {
     try {
       console.log('[ConversationsScreen] Checking aggregated data...');
-      // The scheduled function updatePopularPosts runs automatically every hour
-      // No manual triggering needed - it will create/update the document automatically
+      
+      // Check if document exists
+      const aggregatedDoc = await firestore()
+        .collection('aggregated')
+        .doc('popularPosts')
+        .get();
+
+      let shouldTriggerUpdate = false;
+
+      if (!aggregatedDoc.exists) {
+        console.log('[ConversationsScreen] popularPosts document does not exist, need to create...');
+        shouldTriggerUpdate = true;
+      } else {
+        const data = aggregatedDoc.data();
+        const lastUpdated = data?.lastUpdated?.toDate();
+        const hasPosts = data?.posts && Array.isArray(data.posts) && data.posts.length > 0;
+        
+        if (!lastUpdated) {
+          console.log('[ConversationsScreen] No timestamp found, data is invalid, need to recreate...');
+          shouldTriggerUpdate = true;
+        } else if (!hasPosts) {
+          console.log('[ConversationsScreen] No posts found in aggregated data, need to update...');
+          shouldTriggerUpdate = true;
+        } else {
+          const minutesAgo = Math.round((new Date() - lastUpdated) / 1000 / 60);
+          console.log(`[ConversationsScreen] Data is valid, last updated ${minutesAgo} minutes ago`);
+        }
+      }
+
+      if (shouldTriggerUpdate) {
+        console.log('[ConversationsScreen] Triggering server update...');
+        
+        // Call cloud function to create/update it
+        try {
+          const updateFunction = functions().httpsCallable('triggerPopularPostsUpdate');
+          const result = await updateFunction();
+          console.log('[ConversationsScreen] Server update result:', result.data);
+          
+          // Wait a moment for the document to be created
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (funcError) {
+          console.log('[ConversationsScreen] Cloud function call failed, will use fallback:', funcError.message);
+        }
+      }
+      
       console.log('[ConversationsScreen] Aggregated data check complete');
     } catch (error) {
       console.log('[ConversationsScreen] Initialization check failed (will use fallback):', error.message);
       // Don't throw - we'll use fallback if this fails
     }
   }, []);
+  
 
   // Load popular posts with retry logic
   const loadPopularPosts = useCallback(async () => {
