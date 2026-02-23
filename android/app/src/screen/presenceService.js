@@ -1,338 +1,141 @@
-// presenceService.js - Service for tracking user online/offline status
-import firestore from '@react-native-firebase/firestore';
-import auth from '@react-native-firebase/auth';
-import { AppState } from 'react-native';
+// presenceService.js - User online/offline from WebSocket connection only
+// No Firestore reads/writes: if the user is connected to the socket, they're online.
+// Server sends online list on auth and broadcasts user_status_changed; we keep state in memory.
+import wsChatService from '../../service/wsChatService';
+
+const ONLINE_THRESHOLD_MS = 120000;   // 2 min - still "Online" if lastSeen within this
+const RECENTLY_ACTIVE_THRESHOLD_MS = 60 * 60 * 1000; // 60 min - "Recently active" below this, "Last seen X" above
+
+function parseLastSeen(lastSeen) {
+  if (!lastSeen) return null;
+  if (typeof lastSeen === 'string') return new Date(lastSeen);
+  if (lastSeen.toDate) return lastSeen.toDate();
+  return new Date(lastSeen);
+}
 
 class PresenceService {
   constructor() {
-    this.db = firestore();
-    this.heartbeatInterval = null;
-    this.appStateSubscription = null;
     this.isInitialized = false;
     this.currentUserId = null;
-    
-    // Configuration - Optimized to reduce writes
-    this.HEARTBEAT_INTERVAL = 60000; // 60 seconds (increased from 30s to reduce writes by 50%)
-    this.ONLINE_THRESHOLD = 120000; // 2 minutes - user is online if lastSeen within 2 min
-    this.RECENTLY_ACTIVE_THRESHOLD = 600000; // 10 minutes - recently active if within 10 min
-    this.lastWriteTime = 0; // Track last write to prevent excessive writes
-    this.MIN_WRITE_INTERVAL = 30000; // Minimum 30 seconds between writes
   }
 
-  /**
-   * Initialize presence tracking for the current user
-   */
   initialize(userId) {
-    if (this.isInitialized && this.currentUserId === userId) {
-      return; // Already initialized for this user
-    }
-
-    this.cleanup(); // Clean up any existing tracking
+    if (this.isInitialized && this.currentUserId === userId) return;
+    this.cleanup();
     this.currentUserId = userId;
     this.isInitialized = true;
-
-    // Clear any stale online status before initializing
-    // This fixes cases where app crashed and isOnline flag is stuck
-    this.checkAndFixStaleOnlineStatus(userId).then(() => {
-      // Set initial online status after clearing stale data
-      this.setOnlineStatus(true);
-
-      // Start heartbeat
-      this.startHeartbeat();
-
-      // Listen to app state changes
-      this.setupAppStateListener();
-    });
   }
 
-  /**
-   * Start sending periodic heartbeat updates
-   */
-  startHeartbeat() {
-    // Send initial heartbeat
-    this.updateLastSeen();
+  startHeartbeat() {}
+  stopHeartbeat() {}
+  setupAppStateListener() {}
 
-    // Set up interval for periodic heartbeats
-    this.heartbeatInterval = setInterval(() => {
-      if (this.currentUserId && AppState.currentState === 'active') {
-        this.updateLastSeen();
-      }
-    }, this.HEARTBEAT_INTERVAL);
-  }
-
-  /**
-   * Update lastSeen timestamp in user's profile
-   * Optimized to prevent excessive writes
-   */
-  async updateLastSeen() {
-    if (!this.currentUserId) return;
-
-    // Throttle writes to prevent excessive Firestore operations
-    const now = Date.now();
-    if (this.lastWriteTime && (now - this.lastWriteTime) < this.MIN_WRITE_INTERVAL) {
-      return; // Skip if last write was too recent
-    }
-
-    try {
-      const profileRef = this.db.collection('profile').doc(this.currentUserId);
-      await profileRef.set(
-        {
-          lastSeen: firestore.FieldValue.serverTimestamp(),
-          isOnline: true,
-        },
-        { merge: true }
-      );
-      this.lastWriteTime = now; // Update last write time
-    } catch (error) {
-      console.error('[PresenceService] Error updating lastSeen:', error);
-    }
-  }
-
-  /**
-   * Check and fix stale online status
-   * This is a safety mechanism to clear isOnline flag if lastSeen is too old
-   */
-  async checkAndFixStaleOnlineStatus(userId) {
-    if (!userId) return;
-
-    try {
-      const profileRef = this.db.collection('profile').doc(userId);
-      const profileDoc = await profileRef.get();
-      
-      if (!profileDoc.exists) return;
-      
-      const profileData = profileDoc.data();
-      const lastSeen = profileData?.lastSeen;
-      const isOnline = profileData?.isOnline;
-      
-      // If isOnline is true but lastSeen is missing or too old, clear the flag
-      if (isOnline === true && lastSeen) {
-        const lastSeenDate = lastSeen.toDate ? lastSeen.toDate() : new Date(lastSeen);
-        const now = new Date();
-        const diffMs = now - lastSeenDate;
-        
-        // If lastSeen is older than 5 minutes, clear isOnline flag
-        if (diffMs > 300000) { // 5 minutes
-          await profileRef.set(
-            { isOnline: false },
-            { merge: true }
-          );
-          console.log(`[PresenceService] Cleared stale isOnline flag for user ${userId}`);
-        }
-      } else if (isOnline === true && !lastSeen) {
-        // If isOnline is true but no lastSeen, clear it
-        await profileRef.set(
-          { isOnline: false },
-          { merge: true }
-        );
-        console.log(`[PresenceService] Cleared isOnline flag (no lastSeen) for user ${userId}`);
-      }
-    } catch (error) {
-      console.error('[PresenceService] Error checking stale online status:', error);
-    }
-  }
-
-  /**
-   * Set online status explicitly
-   * Optimized to prevent excessive writes
-   */
-  async setOnlineStatus(isOnline) {
-    if (!this.currentUserId) return;
-
-    // Throttle writes to prevent excessive Firestore operations
-    const now = Date.now();
-    if (this.lastWriteTime && (now - this.lastWriteTime) < this.MIN_WRITE_INTERVAL) {
-      // If going offline, allow immediate write
-      if (isOnline) {
-        return; // Skip if last write was too recent and we're setting online
-      }
-    }
-
-    try {
-      const profileRef = this.db.collection('profile').doc(this.currentUserId);
-      const updateData = {
-        isOnline: isOnline,
-      };
-
-      if (isOnline) {
-        updateData.lastSeen = firestore.FieldValue.serverTimestamp();
-      }
-
-      await profileRef.set(updateData, { merge: true });
-      this.lastWriteTime = now; // Update last write time
-    } catch (error) {
-      console.error('[PresenceService] Error setting online status:', error);
-    }
-  }
-
-  /**
-   * Setup listener for app state changes (foreground/background)
-   */
-  setupAppStateListener() {
-    this.appStateSubscription = AppState.addEventListener('change', (nextAppState) => {
-      if (nextAppState === 'active') {
-        // App came to foreground
-        this.setOnlineStatus(true);
-        this.startHeartbeat();
-      } else if (nextAppState === 'background' || nextAppState === 'inactive') {
-        // App went to background
-        this.setOnlineStatus(false);
-        this.stopHeartbeat();
-      }
-    });
-  }
-
-  /**
-   * Stop heartbeat interval
-   */
-  stopHeartbeat() {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
-  }
-
-  /**
-   * Cleanup all listeners and intervals
-   */
   cleanup() {
-    this.stopHeartbeat();
-
-    if (this.appStateSubscription) {
-      this.appStateSubscription.remove();
-      this.appStateSubscription = null;
-    }
-
-    // Set offline status when cleaning up
-    if (this.currentUserId) {
-      this.setOnlineStatus(false).catch(() => {
-        // Ignore errors during cleanup
-      });
-    }
-
     this.isInitialized = false;
     this.currentUserId = null;
   }
 
   /**
-   * Get online status text based on lastSeen timestamp
-   * @param {Object} userProfile - User profile document data
-   * @returns {string} - Status text: "Online", "Recently active", or "Offline"
+   * Status text from socket-backed presence { online, lastSeen? }.
+   * lastSeen can be ISO string (from server) or Firestore-like.
    */
-  getStatusText(userProfile) {
-    if (!userProfile) return 'Offline';
+  getStatusText(presenceData) {
+    if (!presenceData) return 'Offline';
+    if (presenceData.online === true) return 'Online';
 
-    // Always check lastSeen timestamp first (most reliable indicator)
-    const lastSeen = userProfile.lastSeen;
-    if (!lastSeen) {
-      // No lastSeen data - check isOnline flag as fallback
-      return userProfile.isOnline === true ? 'Online' : 'Offline';
-    }
+    const lastSeen = parseLastSeen(presenceData.lastSeen);
+    if (!lastSeen) return 'Offline';
 
-    // Convert Firestore timestamp to Date
-    const lastSeenDate = lastSeen.toDate ? lastSeen.toDate() : new Date(lastSeen);
-    const now = new Date();
-    const diffMs = now - lastSeenDate;
-
-    // CRITICAL FIX: Always use lastSeen as source of truth
-    // Even if isOnline flag is true, if lastSeen is old, user is offline
-    if (diffMs < this.ONLINE_THRESHOLD) {
-      // lastSeen is recent (within 2 minutes) - user is online
-      return 'Online';
-    } else if (diffMs < this.RECENTLY_ACTIVE_THRESHOLD) {
-      // lastSeen is within 10 minutes - user was recently active
-      return 'Recently active';
-    } else {
-      // lastSeen is older than 10 minutes - user is offline
-      // Ignore isOnline flag if lastSeen is stale (prevents showing offline users as online)
-      return 'Offline';
-    }
+    const diffMs = Date.now() - lastSeen.getTime();
+    if (diffMs < ONLINE_THRESHOLD_MS) return 'Online';
+    if (diffMs < RECENTLY_ACTIVE_THRESHOLD_MS) return 'Recently active';
+    return 'Offline';
   }
 
   /**
-   * Format "last seen" time for display
-   * @param {Object} userProfile - User profile document data
-   * @returns {string} - Formatted time string
+   * Last-seen display: < 60 min use status "Recently active" (return '' here).
+   * >= 60 min return "Last seen X ago" (e.g. "Last seen 2 hours ago").
    */
-  getLastSeenText(userProfile) {
-    if (!userProfile || !userProfile.lastSeen) return '';
-
-    const lastSeen = userProfile.lastSeen.toDate 
-      ? userProfile.lastSeen.toDate() 
-      : new Date(userProfile.lastSeen);
-    
-    const now = new Date();
-    const diffMs = now - lastSeen;
+  getLastSeenText(presenceData) {
+    const lastSeen = presenceData?.lastSeen ? parseLastSeen(presenceData.lastSeen) : null;
+    if (!lastSeen) return '';
+    const diffMs = Date.now() - lastSeen.getTime();
     const diffMins = Math.floor(diffMs / 60000);
     const diffHours = Math.floor(diffMs / 3600000);
     const diffDays = Math.floor(diffMs / 86400000);
 
-    if (diffMins < 1) {
-      return 'Just now';
-    } else if (diffMins < 60) {
-      return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
-    } else if (diffHours < 24) {
-      return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
-    } else if (diffDays < 7) {
-      return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
-    } else {
-      return lastSeen.toLocaleDateString();
-    }
+    // Under 60 min: caller shows "Recently active" from status; no "Last seen" here
+    if (diffMs < RECENTLY_ACTIVE_THRESHOLD_MS) return '';
+
+    const prefix = 'Last seen ';
+    if (diffMins < 60) return `${prefix}${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
+    if (diffHours < 24) return `${prefix}${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+    if (diffDays < 7) return `${prefix}${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+    return prefix + lastSeen.toLocaleDateString();
   }
 
   /**
-   * Subscribe to a user's online status changes
-   * @param {string} userId - User ID to monitor
-   * @param {Function} callback - Callback function(statusText, lastSeenText)
-   * @returns {Function} - Unsubscribe function
+   * Subscribe to a user's online status from WebSocket only (no Firestore).
+   * When socket is connected: use in-memory presence from server events.
+   * When socket is disconnected: show Offline.
+   * If socket is not connected yet, waits for connection then pushes status (so ChatScreen updates when ready).
    */
   subscribeToUserStatus(userId, callback) {
-    if (!userId) {
-      return () => {};
-    }
+    if (!userId) return () => {};
 
-    try {
-      const profileRef = this.db.collection('profile').doc(userId);
-      
-      // Check and fix stale online status when subscribing
-      this.checkAndFixStaleOnlineStatus(userId);
-      
-      // Set up periodic check for stale status (every 5 minutes)
-      const staleCheckInterval = setInterval(() => {
-        this.checkAndFixStaleOnlineStatus(userId);
-      }, 300000); // 5 minutes
-      
-      const unsubscribe = profileRef.onSnapshot(
-        (doc) => {
-          if (doc.exists) {
-            const profileData = doc.data();
-            const statusText = this.getStatusText(profileData);
-            const lastSeenText = this.getLastSeenText(profileData);
-            callback(statusText, lastSeenText, profileData);
-          } else {
-            callback('Offline', '', null);
-          }
-        },
-        (error) => {
-          console.error('[PresenceService] Error subscribing to user status:', error);
-          callback('Offline', '', null);
-        }
-      );
+    const pushStatus = () => {
+      const presence = wsChatService.getUserPresence(userId);
+      const statusText = this.getStatusText(presence);
+      const lastSeenText = this.getLastSeenText(presence);
+      callback(statusText, lastSeenText, presence);
+    };
 
-      // Return cleanup function that clears both the snapshot listener and interval
-      return () => {
-        unsubscribe();
-        clearInterval(staleCheckInterval);
+    const onStatusChanged = (data) => {
+      if (data.userId === userId) pushStatus();
+    };
+    const onPresenceSnapshot = () => pushStatus();
+
+    const addRealListeners = () => {
+      wsChatService.addListener('user_status_changed', onStatusChanged);
+      wsChatService.addListener('presence_snapshot', onPresenceSnapshot);
+    };
+    const removeRealListeners = () => {
+      wsChatService.removeListener('user_status_changed', onStatusChanged);
+      wsChatService.removeListener('presence_snapshot', onPresenceSnapshot);
+    };
+
+    if (!wsChatService.isConnected) {
+      callback('Offline', '', null);
+      // Wait for socket to connect, then push status and listen for updates
+      const onConnect = () => {
+        pushStatus();
+        addRealListeners();
+        wsChatService.removeListener('presence_snapshot', onConnect);
+        clearInterval(pollInterval);
       };
-    } catch (error) {
-      console.error('[PresenceService] Error setting up status subscription:', error);
-      return () => {};
+      wsChatService.addListener('presence_snapshot', onConnect);
+      const pollInterval = setInterval(() => {
+        if (wsChatService.isConnected) onConnect();
+      }, 400);
+      return () => {
+        clearInterval(pollInterval);
+        wsChatService.removeListener('presence_snapshot', onConnect);
+        removeRealListeners();
+      };
     }
+
+    pushStatus();
+    addRealListeners();
+    return () => removeRealListeners();
+  }
+
+  /**
+   * Is the current user online? = WebSocket connected.
+   */
+  isCurrentUserOnline() {
+    return wsChatService.isConnected;
   }
 }
 
-// Export singleton instance
 const presenceService = new PresenceService();
 export default presenceService;
-
-

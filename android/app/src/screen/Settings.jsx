@@ -332,6 +332,13 @@ const Settings = () => {
         <Text style={styles.followersFollowingText}>Followers & Following</Text>
       </TouchableOpacity>
       
+        <TouchableOpacity
+        onPress={() => navigation.navigate('githubConnection')} 
+        style={styles.followersFollowing}
+      >
+        <Text style={styles.followersFollowingText}>github</Text>
+      </TouchableOpacity>
+
       <TouchableOpacity onPress={handleSignOut} style={styles.signOut}>
         <Text style={styles.logoutText}>Logout</Text>
       </TouchableOpacity>
@@ -341,12 +348,7 @@ const Settings = () => {
       </TouchableOpacity>
 
       
-        <TouchableOpacity
-        onPress={() => navigation.navigate('githubConnection')} 
-        style={styles.followersFollowing}
-      >
-        <Text style={styles.followersFollowingText}>github</Text>
-      </TouchableOpacity>
+       
 
 
       

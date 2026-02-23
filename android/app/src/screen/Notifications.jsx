@@ -378,22 +378,22 @@ const acceptCollaborationInvite = async (notification) => {
             Linking.openURL('https://github.com/notifications');
           },
         },
-        {
-          text: 'OK',
-          onPress: () => {
-            // Navigate to chat
-            navigation.navigate('ChatScreen', {
-              chatId: chatId,
-              title: projectData.title,
-              isGroupChat: true,
-              groupChatData: {
-                name: projectData.title,
-                participants: chatDoc.data().participants || [],
-                participantsInfo: chatDoc.data().participantsInfo || {},
-              },
-            });
-          },
-        },
+        // {
+        //   text: 'OK',
+        //   onPress: () => {
+        //     // Navigate to chat
+        //     navigation.navigate('ChatScreen', {
+        //       chatId: chatId,
+        //       title: projectData.title,
+        //       isGroupChat: true,
+        //       groupChatData: {
+        //         name: projectData.title,
+        //         participants: chatDoc.data().participants || [],
+        //         participantsInfo: chatDoc.data().participantsInfo || {},
+        //       },
+        //     });
+        //   },
+        // },
       ]
     );
   } catch (error) {

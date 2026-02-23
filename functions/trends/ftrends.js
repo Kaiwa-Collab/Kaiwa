@@ -81,7 +81,7 @@ async function fetchHackerNewsTrendingHelper() {
     'https://hacker-news.firebaseio.com/v0/topstories.json'
   );
 
-  const ids = topStories.data.slice(0, 20);
+  const ids = topStories.data.slice(0, 10);
 
   const stories = await Promise.all(
     ids.map(async (id) => {

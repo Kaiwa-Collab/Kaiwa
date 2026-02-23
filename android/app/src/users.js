@@ -437,9 +437,7 @@ export const UserProvider = ({ children }) => {
   try {
     const getTrendingQuestions = functions().httpsCallable('getTrendingQuestions');
     const result = await getTrendingQuestions();
-    
-    // Convert timestamp strings back to Date objects
-    return result.data.map(q => ({
+    return (result?.data || []).map(q => ({
       ...q,
       timestamp: new Date(q.timestamp),
       createdAt: new Date(q.timestamp)

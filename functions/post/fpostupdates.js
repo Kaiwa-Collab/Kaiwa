@@ -1,27 +1,54 @@
 const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { onRequest } = require('firebase-functions/v2/https');
+const { onRequest, onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const {  onCall } = require('firebase-functions/v2/https'); 
 
-// Don't initialize admin here - it's already initialized in index.js or will be by first import
 if (!admin.apps.length) {
   admin.initializeApp();
 }
 
-// ==================== HELPER FUNCTION TO UPDATE POPULAR POSTS ====================
+// ==================== AVATAR HYDRATION ====================
+// Fetches fresh avatars from profile collection for a list of posts.
+// Called during aggregation so the client gets fresh avatars for free —
+// no extra profile reads needed on the client side for popular posts.
+const hydratePostAvatars = async (posts) => {
+  if (!posts || posts.length === 0) return posts;
+
+  const uniqueUserIds = [...new Set(posts.map(p => p.userId).filter(Boolean))];
+  if (uniqueUserIds.length === 0) return posts;
+
+  // 1 read per unique user, fired in parallel
+  const profileSnaps = await Promise.all(
+    uniqueUserIds.map(uid =>
+      admin.firestore().collection('profile').doc(uid).get()
+    )
+  );
+
+  const avatarMap = {};
+  profileSnaps.forEach((snap, i) => {
+    if (snap.exists) {
+      avatarMap[uniqueUserIds[i]] = snap.data()?.avatar || null;
+    }
+  });
+
+  return posts.map(post => ({
+    ...post,
+    // Fresh avatar from profile takes priority over stale post-stored avatar
+    userAvatar: avatarMap[post.userId] || post.userAvatar || null,
+  }));
+};
+
+// ==================== HELPER: UPDATE POPULAR POSTS ====================
 const updatePopularPostsLogic = async () => {
   console.log('🔄 Starting popular posts aggregation...');
-  
+
   try {
-    // Check if document exists and when it was last updated
     const aggregatedDoc = await admin.firestore()
       .collection('aggregated')
       .doc('popularPosts')
       .get();
 
     const now = admin.firestore.Timestamp.now();
-    const sixHoursInMs = 6 * 60 * 60 * 1000; // 6 hours in milliseconds
-
+    const sixHoursInMs = 6 * 60 * 60 * 1000;
     let shouldUpdate = false;
 
     if (!aggregatedDoc.exists) {
@@ -30,23 +57,20 @@ const updatePopularPostsLogic = async () => {
     } else {
       const data = aggregatedDoc.data();
       const lastUpdated = data?.lastUpdated;
-      
+
       if (!lastUpdated) {
         console.log('⚠️ No lastUpdated timestamp found, updating...');
         shouldUpdate = true;
       } else {
-        const lastUpdatedMs = lastUpdated.toMillis();
-        const nowMs = now.toMillis();
-        const timeSinceUpdate = nowMs - lastUpdatedMs;
+        const timeSinceUpdate = now.toMillis() - lastUpdated.toMillis();
         const minutesSinceUpdate = Math.round(timeSinceUpdate / 1000 / 60);
-        
         console.log(`⏰ Last updated ${minutesSinceUpdate} minutes ago`);
-        
+
         if (timeSinceUpdate > sixHoursInMs) {
           console.log('🔄 Data is older than 6 hours, updating...');
           shouldUpdate = true;
         } else {
-          console.log('✅ Data is fresh (less than 6 hours old), skipping update');
+          console.log('✅ Data is fresh, skipping update');
           return {
             success: true,
             message: `Data is fresh (updated ${minutesSinceUpdate} minutes ago)`,
@@ -57,48 +81,30 @@ const updatePopularPostsLogic = async () => {
     }
 
     if (!shouldUpdate) {
-      return {
-        success: true,
-        message: 'No update needed',
-        skipped: true
-      };
+      return { success: true, message: 'No update needed', skipped: true };
     }
 
-    // Proceed with update
+    // Fetch top posts
     let postsSnapshot;
     try {
       postsSnapshot = await admin.firestore()
-        .collection('posts')
-        .orderBy('likes', 'desc')
-        .limit(50)
-        .get();
-    } catch (error) {
-      console.log('⚠️ Trying fallback with likeCount field...');
+        .collection('posts').orderBy('likes', 'desc').limit(50).get();
+    } catch {
       try {
         postsSnapshot = await admin.firestore()
-          .collection('posts')
-          .orderBy('likeCount', 'desc')
-          .limit(50)
-          .get();
-      } catch (fallbackError) {
-        console.log('⚠️ Getting posts without ordering...');
+          .collection('posts').orderBy('likeCount', 'desc').limit(50).get();
+      } catch {
         postsSnapshot = await admin.firestore()
-          .collection('posts')
-          .limit(50)
-          .get();
+          .collection('posts').limit(50).get();
       }
     }
 
     if (postsSnapshot.empty) {
       console.log('⚠️ No posts found in database');
-      return {
-        success: false,
-        message: 'No posts found in database',
-        error: 'NO_POSTS'
-      };
+      return { success: false, message: 'No posts found in database', error: 'NO_POSTS' };
     }
 
-    const popularPosts = postsSnapshot.docs.map(doc => {
+    let popularPosts = postsSnapshot.docs.map(doc => {
       const data = doc.data();
       return {
         id: doc.id,
@@ -106,7 +112,6 @@ const updatePopularPostsLogic = async () => {
         userId: data.userId,
         username: data.username,
         imageUrl: data.imageUrl || null,
-        avatarUrl: data.avatarUrl || null,
         userAvatar: data.userAvatar || null,
         caption: data.caption || data.content || '',
         likeCount: data.likes || data.likeCount || 0,
@@ -115,6 +120,12 @@ const updatePopularPostsLogic = async () => {
         createdAt: data.createdAt,
       };
     });
+
+    // Hydrate with fresh avatars from profile collection during aggregation.
+    // This means clients reading this doc get fresh avatars for free —
+    // no extra profile reads needed on the client for popular posts.
+    console.log('🖼️ Hydrating avatars from profile collection...');
+    popularPosts = await hydratePostAvatars(popularPosts);
 
     await admin.firestore()
       .collection('aggregated')
@@ -125,8 +136,7 @@ const updatePopularPostsLogic = async () => {
         totalPosts: popularPosts.length,
       });
 
-    console.log(`✅ Successfully aggregated ${popularPosts.length} popular posts`);
-    
+    console.log(`✅ Successfully aggregated ${popularPosts.length} popular posts with fresh avatars`);
     return {
       success: true,
       message: `Successfully aggregated ${popularPosts.length} popular posts`,
@@ -138,45 +148,36 @@ const updatePopularPostsLogic = async () => {
   }
 };
 
-// ==================== HELPER FUNCTION TO UPDATE POPULAR USERS ====================
+// ==================== HELPER: UPDATE POPULAR USERS ====================
 const updatePopularUsersLogic = async () => {
   console.log('🔄 Starting popular users aggregation...');
-  
+
   try {
-    // Check if document exists and when it was last updated
     const aggregatedDoc = await admin.firestore()
       .collection('aggregated')
       .doc('popularUsers')
       .get();
 
     const now = admin.firestore.Timestamp.now();
-    const sixHoursInMs = 6 * 60 * 60 * 1000; // 6 hours in milliseconds
-
+    const sixHoursInMs = 6 * 60 * 60 * 1000;
     let shouldUpdate = false;
 
     if (!aggregatedDoc.exists) {
-      console.log('📝 popularUsers document does not exist, creating...');
       shouldUpdate = true;
     } else {
       const data = aggregatedDoc.data();
       const lastUpdated = data?.lastUpdated;
-      
+
       if (!lastUpdated) {
-        console.log('⚠️ No lastUpdated timestamp found, updating...');
         shouldUpdate = true;
       } else {
-        const lastUpdatedMs = lastUpdated.toMillis();
-        const nowMs = now.toMillis();
-        const timeSinceUpdate = nowMs - lastUpdatedMs;
+        const timeSinceUpdate = now.toMillis() - lastUpdated.toMillis();
         const minutesSinceUpdate = Math.round(timeSinceUpdate / 1000 / 60);
-        
         console.log(`⏰ Last updated ${minutesSinceUpdate} minutes ago`);
-        
+
         if (timeSinceUpdate > sixHoursInMs) {
-          console.log('🔄 Data is older than 6 hours, updating...');
           shouldUpdate = true;
         } else {
-          console.log('✅ Data is fresh (less than 6 hours old), skipping update');
           return {
             success: true,
             message: `Data is fresh (updated ${minutesSinceUpdate} minutes ago)`,
@@ -187,14 +188,9 @@ const updatePopularUsersLogic = async () => {
     }
 
     if (!shouldUpdate) {
-      return {
-        success: true,
-        message: 'No update needed',
-        skipped: true
-      };
+      return { success: true, message: 'No update needed', skipped: true };
     }
 
-    // Proceed with update
     const usersSnapshot = await admin.firestore()
       .collection('profile')
       .where('isActive', '==', true)
@@ -203,14 +199,10 @@ const updatePopularUsersLogic = async () => {
       .get();
 
     if (usersSnapshot.empty) {
-      console.log('⚠️ No users found in database');
-      return {
-        success: false,
-        message: 'No users found in database',
-        error: 'NO_USERS'
-      };
+      return { success: false, message: 'No users found in database', error: 'NO_USERS' };
     }
 
+    // Profile collection IS the source of truth for avatars, so no hydration needed here
     const popularUsers = usersSnapshot.docs.map(doc => {
       const data = doc.data();
       return {
@@ -235,7 +227,6 @@ const updatePopularUsersLogic = async () => {
       });
 
     console.log(`✅ Successfully aggregated ${popularUsers.length} popular users`);
-    
     return {
       success: true,
       message: `Successfully aggregated ${popularUsers.length} popular users`,
@@ -247,92 +238,55 @@ const updatePopularUsersLogic = async () => {
   }
 };
 
-// ==================== SCHEDULED FUNCTION: UPDATE POPULAR POSTS ====================
-// This runs every 3 hours but only updates if data is older than 6 hours
+// ==================== SCHEDULED: UPDATE POPULAR POSTS ====================
 exports.updatePopularPosts = onSchedule(
-  {
-    schedule: 'every 3 hours',
-    timeZone: 'America/New_York',
-    memory: '512MB',
-  },
+  { schedule: 'every 3 hours', timeZone: 'America/New_York', memory: '512MB' },
   async (event) => {
-    try {
-      const result = await updatePopularPostsLogic();
-      console.log('Scheduled update result:', result);
-      return null;
-    } catch (error) {
-      console.error('Scheduled update failed:', error);
-      throw error;
-    }
+    const result = await updatePopularPostsLogic();
+    console.log('Scheduled update result:', result);
+    return null;
   }
 );
 
-// ==================== SCHEDULED FUNCTION: UPDATE POPULAR USERS ====================
-// This runs every 3 hours but only updates if data is older than 6 hours
+// ==================== SCHEDULED: UPDATE POPULAR USERS ====================
 exports.updatePopularUsers = onSchedule(
-  {
-    schedule: 'every 3 hours',
-    timeZone: 'America/New_York',
-    memory: '512MB',
-  },
+  { schedule: 'every 3 hours', timeZone: 'America/New_York', memory: '512MB' },
   async (event) => {
-    try {
-      const result = await updatePopularUsersLogic();
-      console.log('Scheduled update result:', result);
-      return null;
-    } catch (error) {
-      console.error('Scheduled update failed:', error);
-      throw error;
-    }
+    const result = await updatePopularUsersLogic();
+    console.log('Scheduled update result:', result);
+    return null;
   }
 );
 
-// ==================== HTTP FUNCTION: MANUAL TRIGGER FOR POPULAR POSTS ====================
-// Call this endpoint to manually trigger an update (useful for testing)
+// ==================== HTTP: MANUAL TRIGGER FOR POPULAR POSTS ====================
 exports.triggerPopularPostsUpdate = onRequest(
-  {
-    memory: '512MB',
-  },
+  { memory: '512MB' },
   async (req, res) => {
     try {
       const result = await updatePopularPostsLogic();
       res.status(200).json(result);
     } catch (error) {
-      console.error('Manual trigger failed:', error);
-      res.status(500).json({
-        success: false,
-        error: error.message
-      });
+      res.status(500).json({ success: false, error: error.message });
     }
   }
 );
 
-// ==================== HTTP FUNCTION: MANUAL TRIGGER FOR POPULAR USERS ====================
-// Call this endpoint to manually trigger an update (useful for testing)
+// ==================== HTTP: MANUAL TRIGGER FOR POPULAR USERS ====================
 exports.triggerPopularUsersUpdate = onRequest(
-  {
-    memory: '512MB',
-  },
+  { memory: '512MB' },
   async (req, res) => {
     try {
       const result = await updatePopularUsersLogic();
       res.status(200).json(result);
     } catch (error) {
-      console.error('Manual trigger failed:', error);
-      res.status(500).json({
-        success: false,
-        error: error.message
-      });
+      res.status(500).json({ success: false, error: error.message });
     }
   }
 );
 
-// ==================== HTTP FUNCTION: CHECK AGGREGATED DATA STATUS ====================
-// Call this endpoint to check the status of aggregated data
+// ==================== HTTP: CHECK AGGREGATED DATA STATUS ====================
 exports.checkAggregatedStatus = onRequest(
-  {
-    memory: '256MB',
-  },
+  { memory: '256MB' },
   async (req, res) => {
     try {
       const [postsDoc, usersDoc] = await Promise.all([
@@ -343,36 +297,17 @@ exports.checkAggregatedStatus = onRequest(
       const now = admin.firestore.Timestamp.now().toMillis();
 
       const getStatus = (doc, docName) => {
-        if (!doc.exists) {
-          return {
-            exists: false,
-            message: `${docName} does not exist`
-          };
-        }
-
+        if (!doc.exists) return { exists: false, message: `${docName} does not exist` };
         const data = doc.data();
         const lastUpdated = data?.lastUpdated;
-        
-        if (!lastUpdated) {
-          return {
-            exists: true,
-            hasTimestamp: false,
-            message: 'No timestamp found',
-            totalItems: data?.totalPosts || data?.totalUsers || 0
-          };
-        }
-
-        const lastUpdatedMs = lastUpdated.toMillis();
-        const timeSinceUpdate = now - lastUpdatedMs;
-        const minutesSinceUpdate = Math.round(timeSinceUpdate / 1000 / 60);
-        const hoursSinceUpdate = (timeSinceUpdate / 1000 / 60 / 60).toFixed(2);
-
+        if (!lastUpdated) return { exists: true, hasTimestamp: false, message: 'No timestamp found', totalItems: data?.totalPosts || data?.totalUsers || 0 };
+        const timeSinceUpdate = now - lastUpdated.toMillis();
         return {
           exists: true,
           hasTimestamp: true,
           lastUpdated: lastUpdated.toDate().toISOString(),
-          minutesSinceUpdate,
-          hoursSinceUpdate: parseFloat(hoursSinceUpdate),
+          minutesSinceUpdate: Math.round(timeSinceUpdate / 1000 / 60),
+          hoursSinceUpdate: parseFloat((timeSinceUpdate / 1000 / 60 / 60).toFixed(2)),
           isStale: timeSinceUpdate > (6 * 60 * 60 * 1000),
           totalItems: data?.totalPosts || data?.totalUsers || 0
         };
@@ -384,69 +319,51 @@ exports.checkAggregatedStatus = onRequest(
         checkTime: new Date().toISOString()
       });
     } catch (error) {
-      console.error('Status check failed:', error);
-      res.status(500).json({
-        success: false,
-        error: error.message
-      });
+      res.status(500).json({ success: false, error: error.message });
     }
   }
 );
 
+// ==================== CALLABLE: GET FOLLOWING POSTS ====================
 exports.getFollowingpost = onCall(
-  {
-    memory: '512MB',
-  },
+  { memory: '512MB' },
   async (request) => {
-    // ✅ FIXED: In v2, context is accessed via request.auth
-    if (!request.auth) {
-      throw new Error('Must be authenticated');
-    }
-    
+    if (!request.auth) throw new Error('Must be authenticated');
+
     const userId = request.auth.uid;
-    const { type, lastTimestamp, limit = 50 } = request.data; // ✅ FIXED: data is accessed via request.data
+    const { type, lastTimestamp, limit = 50 } = request.data;
     const db = admin.firestore();
-    
+
     try {
-      // Get following IDs
       const followingSnapshot = await db
-        .collection('profile')
-        .doc(userId)
-        .collection('following')
-        .get();
-      
+        .collection('profile').doc(userId).collection('following').get();
+
       const followingIds = followingSnapshot.docs.map(doc => doc.id);
-      
-      if (followingIds.length === 0) {
-        return { items: [], hasMore: false };
-      }
-      
-      // Split into chunks of 10 (Firestore 'in' limit)
+      if (followingIds.length === 0) return { items: [], hasMore: false };
+
       const chunks = [];
       for (let i = 0; i < followingIds.length; i += 10) {
         chunks.push(followingIds.slice(i, i + 10));
       }
-      
-      // Fetch in parallel
+
       const collectionName = type === 'posts' ? 'posts' : 'questions';
       const userField = type === 'posts' ? 'userId' : 'authorId';
-      
+
       const promises = chunks.map(ids => {
         let query = db.collection(collectionName)
           .where(userField, 'in', ids)
           .orderBy('timestamp', 'desc')
           .limit(limit);
-        
         if (lastTimestamp) {
-          query = query.startAfter(admin.firestore.Timestamp.fromDate(new Date(lastTimestamp)));
+          query = query.startAfter(
+            admin.firestore.Timestamp.fromDate(new Date(lastTimestamp))
+          );
         }
-        
         return query.get();
       });
-      
+
       const snapshots = await Promise.all(promises);
-      
-      // Combine and deduplicate
+
       const allItems = snapshots.flatMap(snapshot =>
         snapshot.docs.map(doc => {
           const data = doc.data();
@@ -458,18 +375,34 @@ exports.getFollowingpost = onCall(
           };
         })
       );
-      
-      // Remove duplicates and sort
+
       const uniqueItems = Array.from(
         new Map(allItems.map(item => [item.id, item])).values()
       ).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-      
+
+      // Hydrate avatars server-side — client gets fresh avatars for free
+      const uniqueUserIds = [...new Set(uniqueItems.map(item => item.userId).filter(Boolean))];
+      const profileDocs = await Promise.all(
+        uniqueUserIds.map(uid => db.collection('profile').doc(uid).get())
+      );
+
+      const avatarMap = {};
+      profileDocs.forEach((doc, i) => {
+        if (doc.exists) avatarMap[uniqueUserIds[i]] = doc.data()?.avatar || null;
+      });
+
+      const enrichedItems = uniqueItems.slice(0, limit).map(item => ({
+        ...item,
+        userAvatar: avatarMap[item.userId] || item.userAvatar || null,
+      }));
+
       return {
-        items: uniqueItems.slice(0, limit),
+        items: enrichedItems,
         hasMore: uniqueItems.length === limit,
-        lastTimestamp: uniqueItems.length > 0 ? uniqueItems[uniqueItems.length - 1].timestamp : null
+        lastTimestamp: enrichedItems.length > 0
+          ? enrichedItems[enrichedItems.length - 1].timestamp
+          : null
       };
-      
     } catch (error) {
       console.error('Error fetching following feed:', error);
       throw new Error('Error fetching feed');

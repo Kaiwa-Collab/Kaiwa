@@ -47,7 +47,9 @@ const arraysEqual = (a, b) => {
            item.conversationId === bItem.conversationId &&
            item.lastMessage === bItem.lastMessage &&
            item.unreadCount === bItem.unreadCount &&
-           item.isPinned === bItem.isPinned;
+           item.isPinned === bItem.isPinned &&
+           item.groupavatar === bItem.groupavatar &&
+            item.avatar === bItem.avatar;
   });
 };
 
@@ -91,6 +93,7 @@ function CustomDrawerContent({ navigation }) {
   const {
     loading: contextLoading,
     getCachedImageUri,
+    cacheImage,
     currentUser,
   } = useUserData();
 
@@ -143,16 +146,63 @@ function CustomDrawerContent({ navigation }) {
     setIsInitialLoad(false);
   }
 };       
-  // Set up listeners only once when component mounts
-useEffect(() => {
-  if (!currentUser?.uid) {
-    setLoading(false);
-    setIsInitialLoad(false);
-    return;
-  }
+  // Initial load
+  useEffect(() => {
+    if (!currentUser?.uid) {
+      setLoading(false);
+      setIsInitialLoad(false);
+      return;
+    }
 
-  loadActiveConversations();
-}, [currentUser?.uid]);
+    loadActiveConversations();
+  }, [currentUser?.uid]);
+
+  useEffect(() => {
+  activeConversations.forEach(conv => {
+    if (conv.type === 'group' && conv.groupavatar) {
+      cacheImage(conv.groupavatar);
+    }
+     if (conv.type === 'direct' && conv.avatar) {
+      cacheImage(conv.avatar);
+    }
+  });
+}, [activeConversations]);
+
+  // Real-time listener: when aggregated conversations doc updates (e.g. new message sent), refresh list
+  useEffect(() => {
+    const uid = currentUser?.uid || auth().currentUser?.uid;
+    if (!uid) return;
+
+    const unsubscribe = firestore()
+      .collection('aggregated')
+      .doc(`conversations_${uid}`)
+      .onSnapshot(
+        (doc) => {
+          if (!doc.exists) return;
+          const data = doc.data();
+          const conversations = data.conversations || [];
+          const messageRequests = {
+            received: data.messageRequests?.received || [],
+            sent: data.messageRequests?.sent || []
+          };
+          if (!arraysEqual(conversations, prevConversationsRef.current)) {
+            prevConversationsRef.current = conversations;
+            setActiveConversations(conversations);
+          }
+          if (!requestsEqual(messageRequests.received || [], prevReceivedRequestsRef.current)) {
+            prevReceivedRequestsRef.current = messageRequests.received || [];
+            setReceivedRequests(messageRequests.received || []);
+          }
+          if (!requestsEqual(messageRequests.sent || [], prevPendingRequestsRef.current)) {
+            prevPendingRequestsRef.current = messageRequests.sent || [];
+            setPendingRequests(messageRequests.sent || []);
+          }
+        },
+        (err) => console.warn('[First.jsx] Aggregated listener error:', err)
+      );
+
+    return () => unsubscribe();
+  }, [currentUser?.uid]);
  // Only depend on user ID, not the entire user object
 
 // Add a function to manually refresh conversations (useful for when returning from chat)
@@ -347,14 +397,25 @@ const handleRefresh = React.useCallback(() => {
         Alert.alert('Error', 'Invalid user selected');
         return;
       }
+      
+      const chatAvatar = item.type === 'group'
+      ? (item.groupavatar || item.avatar || '')
+      : (item.avatar || item.photoURL || '');
 
       const hasActiveChat = activeConversations.some(conv => conv.id === item.id);
       
       if (hasActiveChat) {
         const conversation = activeConversations.find(conv => conv.id === item.id);
-        
+        // Must use chat document id (conversationId), never the other user's id (item.id).
+        // Server expects /api/messages/:chatId where chatId is the Firestore chat doc id (e.g. userId1_userId2).
+        const chatDocId =
+          conversation.conversationId ||
+          (conversation.type === 'direct' && currentUserId && item.id
+            ? [currentUserId, item.id].sort().join('_')
+            : item.id);
+
         navigation.getParent().navigate('ChatScreen', {
-          chatId: conversation.conversationId || item.id,
+          chatId: chatDocId,
           title: item.displayName || item.name || item.username || 'Unknown User',
           avatar: getCachedImageUri(item.avatar || item.photoURL || ''),
           userId: item.id,
@@ -371,7 +432,8 @@ const handleRefresh = React.useCallback(() => {
         navigation.getParent().navigate('ChatScreen', {
           chatId: existingChatCheck.chatId,
           title: item.displayName || item.name || item.username || 'Unknown User',
-          avatar: getCachedImageUri(item.avatar || item.photoURL || ''),
+          // avatar: getCachedImageUri(item.avatar || item.photoURL || ''),
+          avatar: getCachedImageUri(chatAvatar),
           userId: item.id,
         });
         return;
@@ -390,7 +452,8 @@ const handleRefresh = React.useCallback(() => {
         navigation.getParent().navigate('ChatScreen', {
           chatId: conversationId || item.id,
           title: item.displayName || item.name || item.username || 'Unknown User',
-          avatar: getCachedImageUri(item.avatar || item.photoURL || ''),
+          // avatar: getCachedImageUri(item.avatar || item.photoURL || ''),
+           avatar: getCachedImageUri(chatAvatar), 
           userId: item.id,
           isDirectMessage: true,
         });
@@ -573,6 +636,10 @@ const handleRefresh = React.useCallback(() => {
     const isOnline = item.type === 'direct' && userId && userOnlineStatus[userId] === 'Online';
     const isOffline = item.type === 'direct' && userId && userOnlineStatus[userId] === 'Offline';
     const showOnlineIndicator = item.type === 'direct' && (isOnline || isOffline);
+
+    const avatarUri = item.type === 'group'
+  ? (item.groupavatar || null)
+  : (item.avatar || item.photoURL || null);
     
     return (
       <TouchableOpacity
@@ -585,19 +652,17 @@ const handleRefresh = React.useCallback(() => {
         onPress={() => handleChatPress(item)}
         activeOpacity={0.7}
       >
-        <View style={styles.avatarPlaceholder}>
-          {item.avatar || item.photoURL ? (
-            <Image 
-              source={{ uri: getCachedImageUri(item.avatar || item.photoURL) }} 
-              style={styles.avatarImage}
-              onError={() => {}}
-            />
-          ) : (
-            <Text style={styles.avatarText}>
-              {getInitials(item)}
-            </Text>
-          )}
-        </View>
+       <View style={styles.avatarPlaceholder}>
+  {avatarUri ? (
+    <Image 
+      source={{ uri: getCachedImageUri(avatarUri) }} 
+      style={styles.avatarImage}
+      onError={() => {}}
+    />
+  ) : (
+    <Text style={styles.avatarText}>{getInitials(item)}</Text>
+  )}
+</View>
         <View style={styles.chatInfo}>
           <View style={styles.nameContainer}>
             <Text style={styles.chatName}>{getDisplayName(item)}</Text>

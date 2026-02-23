@@ -1,12 +1,15 @@
+// Updated Qna.jsx - Using Firebase Cloud Functions for search
+
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Image, StyleSheet,
-  SafeAreaView, Modal, FlatList, Dimensions, StatusBar, Platform, Alert, TextInput
+  SafeAreaView, Modal, FlatList, Dimensions, StatusBar, Platform, Alert, TextInput, RefreshControl
 } from 'react-native';
 import { launchImageLibrary } from 'react-native-image-picker';
 import { useUserData } from '../users';
 import Firestore from '@react-native-firebase/firestore';
 import auth from '@react-native-firebase/auth';
+import functions from '@react-native-firebase/functions'; // ADDED
 import { useNavigation, useFocusEffect, useRoute } from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/FontAwesome';
 
@@ -52,11 +55,6 @@ const Qna = () => {
   const [loadingTrendingQuestions, setLoadingTrendingQuestions] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   
-  // Pagination
-  const [lastVisible, setLastVisible] = useState(null);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
-  
   // Search functionality
   const [searchQuery, setSearchQuery] = useState('');
   const [searchActiveTab, setSearchActiveTab] = useState('questions');
@@ -67,7 +65,6 @@ const Qna = () => {
 
   // Refs for cleanup
   const isMounted = useRef(true);
-  const searchAbortController = useRef(null);
 
   // Popular tech tags
   const POPULAR_TECH_TAGS = [
@@ -82,9 +79,6 @@ const Qna = () => {
     isMounted.current = true;
     return () => {
       isMounted.current = false;
-      if (searchAbortController.current) {
-        searchAbortController.current.abort();
-      }
     };
   }, []);
 
@@ -106,7 +100,7 @@ const Qna = () => {
     trendingScore: question.trendingScore || 0
   }), []);
 
-  // Fetch trending questions with error handling
+  // Fetch trending questions
   const loadTrendingQuestions = useCallback(async (silent = false) => {
     if (!currentUser) {
       setTrendingQuestions([]);
@@ -141,24 +135,23 @@ const Qna = () => {
     loadTrendingQuestions(false);
   }, [currentUser]);
 
-  // Background refresh with proper interval cleanup
+  // Background refresh
   useEffect(() => {
     if (!currentUser) return;
     
     const interval = setInterval(() => {
-      loadTrendingQuestions(true); // Silent refresh
-    }, 5 * 60 * 1000); // 5 minutes
+      loadTrendingQuestions(true);
+    }, 5 * 60 * 1000);
     
     return () => clearInterval(interval);
   }, [currentUser, loadTrendingQuestions]);
 
-  // Real-time listener for main feed (following users)
+  // Real-time listener for main feed
   useEffect(() => {
     if (!currentUser || !profile?.following || profile.following.length === 0) {
       return;
     }
 
-    // Firestore 'in' query limit is 10, so we need to batch if following > 10 users
     const followingIds = profile.following.slice(0, 10);
     
     const unsubscribe = Firestore()
@@ -169,7 +162,6 @@ const Qna = () => {
       .onSnapshot(
         (snapshot) => {
           if (!isMounted.current) return;
-          // Changes are handled by the context, this is just for real-time updates
           console.log('Real-time update received for following questions');
         },
         (error) => {
@@ -198,40 +190,34 @@ const Qna = () => {
     }
   }, [loadTrendingQuestions]);
 
-  // Load popular tags with security
+  // ============================================
+  // OPTIMIZED: Load popular tags via Cloud Function
+  // ============================================
   const loadPopularTags = useCallback(async () => {
     try {
-      const questionsSnapshot = await Firestore()
-        .collection('questions')
-        .orderBy('timestamp', 'desc')
-        .limit(500)
-        .get();
+      console.log('📦 Calling Cloud Function: getPopularTags');
+      
+      // Call cloud function instead of client-side query
+      const getPopularTags = functions().httpsCallable('getPopularTags');
+      const result = await getPopularTags({
+        limit: 500,
+        topCount: 20
+      });
 
       if (!isMounted.current) return;
 
-      const tagCount = {};
-      questionsSnapshot.docs.forEach(doc => {
-        const data = doc.data();
-        const tags = Array.isArray(data.tags) ? data.tags : [];
-        tags.forEach(tag => {
-          // Sanitize tags
-          const sanitizedTag = sanitizeInput(tag).toLowerCase();
-          if (sanitizedTag && sanitizedTag.length > 0) {
-            tagCount[sanitizedTag] = (tagCount[sanitizedTag] || 0) + 1;
-          }
-        });
-      });
-
-      const sortedTags = Object.entries(tagCount)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 20)
-        .map(([tag, count]) => ({ tag, count }));
-
-      if (isMounted.current) {
-        setPopularTags(sortedTags);
+      if (result.data.success) {
+        console.log('✅ Popular tags loaded from Cloud Function');
+        setPopularTags(result.data.tags);
+      } else {
+        console.error('❌ Failed to load popular tags:', result.data);
+        setPopularTags([]);
       }
     } catch (error) {
       console.error('Error loading popular tags:', error);
+      if (isMounted.current) {
+        setPopularTags([]);
+      }
     }
   }, []);
 
@@ -239,14 +225,71 @@ const Qna = () => {
     loadPopularTags();
   }, [loadPopularTags]);
 
-  // Debounced search with abort controller
+  // ============================================
+  // OPTIMIZED: Search functions via Cloud Functions
+  // ============================================
+  const searchQuestions = async (text) => {
+    try {
+      console.log('🔍 Calling Cloud Function: searchQuestions');
+      
+      const searchQuestionsFunc = functions().httpsCallable('searchQuestions');
+      const result = await searchQuestionsFunc({
+        query: text,
+        limit: 20
+      });
+
+      if (!isMounted.current) return;
+
+      if (result.data.success) {
+        console.log(`✅ Found ${result.data.results.length} questions`);
+        setSearchResults(result.data.results);
+      } else {
+        console.error('❌ Search failed:', result.data);
+        setSearchResults([]);
+      }
+    } catch (error) {
+      console.error('Error searching questions:', error);
+      if (isMounted.current) {
+        setSearchResults([]);
+      }
+    }
+  };
+
+  const searchByTags = async (text) => {
+    try {
+      console.log('🏷️ Calling Cloud Function: searchByTags');
+      
+      const searchByTagsFunc = functions().httpsCallable('searchByTags');
+      const result = await searchByTagsFunc({
+        tag: text,
+        limit: 20
+      });
+
+      if (!isMounted.current) return;
+
+      if (result.data.success) {
+        console.log(`✅ Found ${result.data.results.length} questions with tag: ${text}`);
+        setSearchResults(result.data.results);
+      } else {
+        console.error('❌ Tag search failed:', result.data);
+        setSearchResults([]);
+      }
+    } catch (error) {
+      console.error('Error searching by tags:', error);
+      if (isMounted.current) {
+        setSearchResults([]);
+      }
+    }
+  };
+
+  const searchByTech = async (text) => {
+    // Tech search uses same logic as tag search
+    await searchByTags(text);
+  };
+
+  // Debounced search
   const debouncedSearch = useMemo(
     () => debounce(async (text) => {
-      // Cancel previous search
-      if (searchAbortController.current) {
-        searchAbortController.current.abort();
-      }
-      
       const sanitizedText = sanitizeInput(text);
       
       if (sanitizedText.length === 0) {
@@ -259,7 +302,6 @@ const Qna = () => {
         return;
       }
 
-      searchAbortController.current = new AbortController();
       setSearchLoading(true);
       
       try {
@@ -271,11 +313,9 @@ const Qna = () => {
           await searchByTech(sanitizedText);
         }
       } catch (error) {
-        if (error.name !== 'AbortError') {
-          console.error('Error searching:', error);
-          if (isMounted.current) {
-            setSearchResults([]);
-          }
+        console.error('Error searching:', error);
+        if (isMounted.current) {
+          setSearchResults([]);
         }
       } finally {
         if (isMounted.current) {
@@ -289,109 +329,6 @@ const Qna = () => {
   const handleSearch = (text) => {
     setSearchQuery(text);
     debouncedSearch(text);
-  };
-
-  const searchQuestions = async (text) => {
-    try {
-      const searchLower = text.toLowerCase();
-      const questionsSnapshot = await Firestore()
-        .collection('questions')
-        .orderBy('timestamp', 'desc')
-        .limit(100)
-        .get();
-
-      if (!isMounted.current) return;
-
-      const allQuestions = questionsSnapshot.docs.map(doc => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          title: data.title || '',
-          content: data.content || '',
-          username: data.username || 'Anonymous',
-          userImage: data.userImage || 'https://placehold.co/100',
-          timestamp: data.timestamp?.toDate ? data.timestamp.toDate() : data.timestamp,
-          answers: Array.isArray(data.answers) ? data.answers : [],
-          tags: Array.isArray(data.tags) ? data.tags : [],
-          authorId: data.authorId,
-          likes: typeof data.likes === 'number' ? data.likes : 0,
-          likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
-          imageUrl: data.imageUrl || null
-        };
-      });
-
-      const filtered = allQuestions.filter(question => {
-        const title = (question.title || '').toLowerCase();
-        const content = (question.content || '').toLowerCase();
-        return title.includes(searchLower) || content.includes(searchLower);
-      });
-
-      const sorted = filtered
-        .sort((a, b) => (b.likes || 0) - (a.likes || 0))
-        .slice(0, 20);
-
-      if (isMounted.current) {
-        setSearchResults(sorted);
-      }
-    } catch (error) {
-      console.error('Error searching questions:', error);
-      if (isMounted.current) {
-        setSearchResults([]);
-      }
-    }
-  };
-
-  const searchByTags = async (text) => {
-    try {
-      const searchLower = text.toLowerCase();
-      const questionsSnapshot = await Firestore()
-        .collection('questions')
-        .orderBy('timestamp', 'desc')
-        .limit(200)
-        .get();
-
-      if (!isMounted.current) return;
-
-      const allQuestions = questionsSnapshot.docs.map(doc => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          title: data.title || '',
-          content: data.content || '',
-          username: data.username || 'Anonymous',
-          userImage: data.userImage || 'https://placehold.co/100',
-          timestamp: data.timestamp?.toDate ? data.timestamp.toDate() : data.timestamp,
-          answers: Array.isArray(data.answers) ? data.answers : [],
-          tags: Array.isArray(data.tags) ? data.tags : [],
-          authorId: data.authorId,
-          likes: typeof data.likes === 'number' ? data.likes : 0,
-          likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
-          imageUrl: data.imageUrl || null
-        };
-      });
-
-      const filtered = allQuestions.filter(question => {
-        const tags = (question.tags || []).join(' ').toLowerCase();
-        return tags.includes(searchLower);
-      });
-
-      const sorted = filtered
-        .sort((a, b) => (b.likes || 0) - (a.likes || 0))
-        .slice(0, 20);
-
-      if (isMounted.current) {
-        setSearchResults(sorted);
-      }
-    } catch (error) {
-      console.error('Error searching by tags:', error);
-      if (isMounted.current) {
-        setSearchResults([]);
-      }
-    }
-  };
-
-  const searchByTech = async (text) => {
-    await searchByTags(text);
   };
 
   const handleTagPress = useCallback((tag) => {
@@ -565,7 +502,7 @@ const Qna = () => {
     return itemTime.toLocaleDateString();
   };
 
-  // Question Card with security improvements
+  // Question Card
   const QuestionCard = React.memo(({ question }) => {
     const [isLiked, setIsLiked] = useState(false);
     const [likeCount, setLikeCount] = useState(question.likes || 0);
@@ -588,7 +525,6 @@ const Qna = () => {
 
       if (updating) return;
       
-      // Validate question ID
       if (!question.id || typeof question.id !== 'string') {
         Alert.alert('Error', 'Invalid question ID');
         return;
@@ -596,7 +532,6 @@ const Qna = () => {
 
       setUpdating(true);
 
-      // Optimistic update
       const newIsLiked = !isLiked;
       const newLikeCount = newIsLiked ? likeCount + 1 : Math.max(0, likeCount - 1);
       setIsLiked(newIsLiked);
@@ -615,7 +550,6 @@ const Qna = () => {
       } catch (error) {
         console.error('Error updating like:', error);
         Alert.alert('Error', 'Failed to update like. Please try again.');
-        // Revert optimistic update
         setIsLiked(!newIsLiked);
         setLikeCount(newIsLiked ? Math.max(0, newLikeCount - 1) : newLikeCount + 1);
       } finally {
@@ -793,8 +727,8 @@ const Qna = () => {
     }));
   }, [searchResults, getCachedImageUri]);
 
-  // Question List View
-  const QuestionListView = () => (
+  // Question List View (inline JSX so the TextInput is not remounted on every keystroke)
+  const questionListView = (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#1e1e1e" />
 
@@ -865,7 +799,7 @@ const Qna = () => {
             </TouchableOpacity>
           </View>
 
-          {/* Popular Tags View (when no search query) */}
+          {/* Popular Tags View */}
           {searchQuery.length === 0 && searchActiveTab === 'tags' && (
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.popularTagsContainer}>
               <Text style={styles.sectionLabel}>Popular Tags:</Text>
@@ -882,7 +816,7 @@ const Qna = () => {
             </ScrollView>
           )}
 
-          {/* Tech Tags View (when no search query) */}
+          {/* Tech Tags View */}
           {searchQuery.length === 0 && searchActiveTab === 'tech' && (
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.popularTagsContainer}>
               <Text style={styles.sectionLabel}>Browse Technologies:</Text>
@@ -901,13 +835,14 @@ const Qna = () => {
         </View>
       )}
 
-      {/* Search Results or Regular Questions */}
+      {/* Loading Indicator */}
       {searchLoading && (
         <View style={{ padding: 20, alignItems: 'center' }}>
-          <Text style={{ color: '#aaa' }}>Searching...</Text>
+          <Text style={{ color: '#FF6D1F' }}>🔍 Searching...</Text>
         </View>
       )}
 
+      {/* Search Results or Regular Questions */}
       {showSearch && searchQuery.length > 0 && searchResults.length > 0 ? (
         <FlatList
           data={formattedSearchResults}
@@ -950,7 +885,14 @@ const Qna = () => {
           renderItem={({ item }) => <QuestionCard question={item} />}
           contentContainerStyle={styles.questionsList}
           showsVerticalScrollIndicator={false}
-          refreshing={loading}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              colors={['#FF6D1F']}
+              tintColor="#FF6D1F"
+            />
+          }
         />
       )}
     </View>
@@ -986,7 +928,6 @@ const Qna = () => {
         </View>
 
         <ScrollView style={styles.questionDetail}>
-          {/* Question Section */}
           <View style={styles.questionDetailHeader}>
             <Image source={{ uri: selectedQuestion.userImage }} style={styles.detailUserAvatar} />
             <View style={styles.detailUserInfo}>
@@ -1011,7 +952,6 @@ const Qna = () => {
             </View>
           )}
 
-          {/* All Answers Section */}
           <View style={styles.answersSection}>
             <Text style={styles.answersTitle}>
               {sortedAnswers.length === 0
@@ -1028,22 +968,24 @@ const Qna = () => {
     );
   });
 
- if (loading && followingQuestions.length === 0) {
-  return (
-    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1e1e1e' }}>
-      <Text style={{ color: 'white' }}>Loading your data...</Text>
-    </View>
-  );
-}
+  if (loading && followingQuestions.length === 0) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1e1e1e' }}>
+        <Text style={{ color: 'white' }}>Loading your data...</Text>
+      </View>
+    );
+  }
 
   return (
     <>
-      {selectedQuestion ? <QuestionDetailView /> : <QuestionListView />}
+      {selectedQuestion ? <QuestionDetailView /> : questionListView}
     </>
   );
 };
 
+// Styles remain the same...
 const styles = StyleSheet.create({
+  // ... (keep all existing styles)
   container: {
     flex: 1,
     backgroundColor: '#1e1e1e',
@@ -1062,7 +1004,6 @@ const styles = StyleSheet.create({
     height: 70,
     paddingTop: getStatusBarHeight(),
     paddingHorizontal: 16,
-    
   },
   headerTitle: {
     fontSize: 20,
@@ -1073,7 +1014,6 @@ const styles = StyleSheet.create({
   },
   searchToggleButton: {
     padding: 8,
-    
   },
   searchSection: {
     backgroundColor: '#1e1e1e',
@@ -1487,19 +1427,20 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   replyCodeBlock: {
-  backgroundColor: '#1a1a1a',
-  borderRadius: 6,
-  padding: 8,
-  marginTop: 8,
-  borderWidth: 1,
-  borderColor: '#444',
-},
-replyImage: {
-  width: '100%',
-  height: 150,
-  borderRadius: 8,
-  marginTop: 8,
-  resizeMode: 'cover',
-},
+    backgroundColor: '#1a1a1a',
+    borderRadius: 6,
+    padding: 8,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#444',
+  },
+  replyImage: {
+    width: '100%',
+    height: 150,
+    borderRadius: 8,
+    marginTop: 8,
+    resizeMode: 'cover',
+  },
 });
+
 export default Qna;

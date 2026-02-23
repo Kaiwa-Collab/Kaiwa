@@ -82,6 +82,32 @@ exports.getUserConversations = onCall(async (request) => {
     };
   }
 });
+//===== GET EFFECTIVE LAST MESSAGE (promote previous if last is deleted for user) =====
+async function getEffectiveLastMessage(db, chatId, lastMessage, userId) {
+  if (!lastMessage?.id) return lastMessage;
+  try {
+    const msgDoc = await db.collection('chats').doc(chatId).collection('messages').doc(lastMessage.id).get();
+    if (!msgDoc.exists) return lastMessage;
+    const msgData = msgDoc.data();
+    const deletedForMe = msgData.deletedFor && msgData.deletedFor[userId];
+    const deletedForEveryone = msgData.messageType === 'deleted' || msgData.deletedForEveryone;
+    if (!deletedForMe && !deletedForEveryone) return lastMessage;
+    const prevSnapshot = await db.collection('chats').doc(chatId).collection('messages')
+      .orderBy('createdAt', 'desc').limit(2).get();
+    const docs = prevSnapshot.docs;
+    if (docs.length < 2 || docs[0].id !== lastMessage.id) return lastMessage;
+    const prevDoc = docs[1];
+    const prevData = prevDoc.data();
+    return {
+      id: prevDoc.id,
+      text: prevData.text || (prevData.messageType === 'image' ? '📷 Photo' : prevData.messageType === 'video' ? '📹 Video' : 'Media'),
+      createdAt: prevData.createdAt
+    };
+  } catch (e) {
+    return lastMessage;
+  }
+}
+
 //===== BUILD USER CONVERSATIONS (HELPER) ====================
 async function buildUserConversations(userId) {
   const conversations = [];
@@ -128,6 +154,8 @@ async function buildUserConversations(userId) {
       console.log('lastMessage text:', chatData.lastMessage?.text);
       console.log('updatedAt:', chatData.updatedAt?.toDate?.());
 
+      const effectiveLast = await getEffectiveLastMessage(admin.firestore(), chatId, chatData.lastMessage, userId);
+
       if (chatType === 'group') {
         const groupConv = {
           id: chatId,
@@ -136,9 +164,10 @@ async function buildUserConversations(userId) {
           name: chatData.metadata?.name || 'Group Chat',
           displayName: chatData.metadata?.name || 'Group Chat',
           avatar: chatData.metadata?.avatar || null,
+          groupavatar: chatData.groupavatar || null,
           username: 'group',
-          lastMessage: chatData.lastMessage?.text || '',
-          lastMessageTime: chatData.lastMessage?.createdAt || chatData.updatedAt || admin.firestore.Timestamp.now(),
+          lastMessage: effectiveLast?.text || '',
+          lastMessageTime: effectiveLast?.createdAt || chatData.updatedAt || admin.firestore.Timestamp.now(),
           unreadCount: 0,
           isPinned: false,
           participants: chatData.participants || []
@@ -204,8 +233,8 @@ async function buildUserConversations(userId) {
           conversationId: chatId,
           type: 'direct',
           ...participantInfo,
-          lastMessage: chatData.lastMessage?.text || '',
-          lastMessageTime: chatData.lastMessage?.createdAt || chatData.updatedAt || admin.firestore.Timestamp.now(),
+          lastMessage: effectiveLast?.text || '',
+          lastMessageTime: effectiveLast?.createdAt || chatData.updatedAt || admin.firestore.Timestamp.now(),
           unreadCount: 0,
           isPinned: false
         };
@@ -319,7 +348,7 @@ exports.searchUsers = onCall(async (request) => {
     // Search by username
     const usernameResults = await admin.firestore()
       .collection('profile')
-      .orderBy('username')
+      .orderBy('usernameLower')
       .startAt(sanitizedQuery)
       .endAt(sanitizedQuery + '\uf8ff')
       .limit(limit)

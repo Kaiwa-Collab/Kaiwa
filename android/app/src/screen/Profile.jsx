@@ -106,48 +106,15 @@
       }, [viewedUserId, isOwnProfile, activeTab])
     );
 
-    // Fetch following users for collaboration
     const fetchFollowingUsers = async () => {
       if (!currentUser?.uid) return;
-      
       setLoadingFollowing(true);
       try {
-        const followingSnapshot = await Firestore()
-          .collection('profile')
-          .doc(currentUser.uid)
-          .collection('following')
-          .get();
-
-        const userIds = followingSnapshot.docs.map(doc => doc.id);
-        
-        if (userIds.length === 0) {
-          setFollowingUsers([]);
-          setFilteredUsers([]);
-          setLoadingFollowing(false);
-          return;
-        }
-
-        // Fetch user details
-        const usersPromises = userIds.map(async (userId) => {
-          const userDoc = await Firestore().collection('users').doc(userId).get();
-          const profileDoc = await Firestore().collection('profile').doc(userId).get();
-          
-          if (userDoc.exists) {
-            return {
-              id: userId,
-              username: userDoc.data().username || 'User',
-              email: userDoc.data().email || '',
-              avatar: profileDoc.exists ? profileDoc.data().avatar : 'https://cdn.britannica.com/84/232784-050-1769B477/Siberian-Husky-dog.jpg'
-            };
-          }
-          return null;
-        });
-
-        const users = (await Promise.all(usersPromises)).filter(user => user !== null);
+        const result = await functions().httpsCallable('getFollowingUsers')({});
+        const users = result.data?.users || [];
         setFollowingUsers(users);
         setFilteredUsers(users);
       } catch (error) {
-        
         setFollowingUsers([]);
         setFilteredUsers([]);
       } finally {
@@ -330,9 +297,6 @@
         return;
       }
 
-      const projectRef = Firestore().collection('collaborations').doc();
-      const projectId = projectRef.id;
-
       const groupchat = await chatService.createGroupChat(
         currentUser.uid,
         [],
@@ -340,93 +304,43 @@
         `Collaboration chat for: ${projectAbout.trim()}`
       );
 
-      const projectData = {
-        id: projectId,
-        title: projectTitle.trim(),
+      await functions().httpsCallable('createCollaboration')({
+        projectTitle: projectTitle.trim(),
         about: projectAbout.trim(),
         tech: projectTech.trim(),
         githubRepo: githubRepo.trim(),
-        creatorId: currentUser.uid,
-        creatorUsername: displayName,
-        collaborators: [currentUser.uid],
-        pendingInvites: selectedCollaborators,
-        pendingGitHubAcceptance: [],
-        status: 'pending',
-        createdAt: Firestore.FieldValue.serverTimestamp(),
+        selectedCollaborators,
         chatId: groupchat.id,
-      };
+        creatorUsername: displayName,
+      });
 
-      await projectRef.set(projectData);
-
-      // // Send creation notification to chat
-      // await sendProjectUpdateNotification(
-      //   groupchat.id,
-      //   displayName,
-      //   'created',
-      //   projectTitle.trim()
-      // );
-
-      // Set up GitHub webhook for repository notifications
+      // Optional: set up GitHub webhook (client-side; token stays in Firestore, server could do this later)
       try {
-        // Get user's GitHub token
         const userDoc = await Firestore().collection('users').doc(currentUser.uid).get();
         const githubToken = userDoc.data()?.githubAccessToken;
-
         if (githubToken) {
           const webhookResult = await setupGitHubWebhook(githubRepo.trim(), githubToken);
-          
           if (webhookResult.success) {
-            console.log('✅ GitHub webhook set up successfully');
-            
-            // Store webhook ID in project data
-            await projectRef.update({
-              githubWebhookId: webhookResult.webhookId,
-              webhookSetupAt: Firestore.FieldValue.serverTimestamp()
-            });
-
-            // Send notification to chat
-            await Firestore().collection('chats')
-              .doc(groupchat.id)
-              .collection('messages')
-              .add({
+            const projectSnap = await Firestore().collection('collaborations').where('chatId', '==', groupchat.id).limit(1).get();
+            if (!projectSnap.empty) {
+              await projectSnap.docs[0].ref.update({
+                githubWebhookId: webhookResult.webhookId,
+                webhookSetupAt: Firestore.FieldValue.serverTimestamp()
+              });
+              await Firestore().collection('chats').doc(groupchat.id).collection('messages').add({
                 text: '🔔 GitHub notifications enabled! You\'ll receive updates when changes are made to the repository.',
                 createdAt: Firestore.FieldValue.serverTimestamp(),
                 senderId: 'system',
                 isSystemMessage: true,
                 type: 'github_webhook_setup',
-                metadata: {
-                  projectTitle: projectTitle.trim()
-                }
+                metadata: { projectTitle: projectTitle.trim() }
               });
-          } else {
-            console.warn('⚠️ Could not set up GitHub webhook:', webhookResult.error);
-            // Don't fail the project creation, just log the warning
+            }
           }
         }
       } catch (webhookError) {
         console.error('Error setting up webhook:', webhookError);
-        // Continue anyway - webhook setup is optional
       }
-
-      // Send notifications to selected collaborators
-      const notificationPromises = selectedCollaborators.map(async (userId) => {
-        await Firestore().collection('notifications').add({
-          recipientUid: userId,
-          senderUid: currentUser.uid,
-          type: 'collaboration_invite',
-          data: {
-            message: `invited you to collaborate on "${projectTitle}"`,
-            senderUsername: displayName,
-            projectId: projectId,
-            projectTitle: projectTitle.trim(),
-            chatId: groupchat.id,
-          },
-          read: false,
-          createdAt: Firestore.FieldValue.serverTimestamp(),
-        });
-      });
-
-      await Promise.all(notificationPromises);
 
       Alert.alert(
         'Success',
@@ -487,38 +401,15 @@
       }
     };
 
-    // Fetch project participants details
     const fetchProjectParticipants = async (project) => {
-      if (!project || !project.collaborators) return [];
-      
+      if (!project || !project.id) return [];
       setLoadingParticipants(true);
       try {
-        const participantPromises = project.collaborators.map(async (userId) => {
-          try {
-            const userDoc = await Firestore().collection('users').doc(userId).get();
-            const profileDoc = await Firestore().collection('profile').doc(userId).get();
-            
-            if (userDoc.exists) {
-              return {
-                id: userId,
-                username: userDoc.data().username || 'User',
-                email: userDoc.data().email || '',
-                avatar: profileDoc.exists ? profileDoc.data().avatar : 'https://cdn.britannica.com/84/232784-050-1769B477/Siberian-Husky-dog.jpg',
-                isCreator: userId === project.creatorId
-              };
-            }
-            return null;
-          } catch (error) {
-            
-            return null;
-          }
-        });
-        
-        const participants = (await Promise.all(participantPromises)).filter(p => p !== null);
+        const result = await functions().httpsCallable('getProjectParticipants')({ projectId: project.id });
+        const participants = result.data?.participants || [];
         setProjectParticipants(participants);
         return participants;
       } catch (error) {
-        
         setProjectParticipants([]);
         return [];
       } finally {
@@ -562,10 +453,8 @@
       setProjectParticipants([]);
     };
 
-    // Update project details
     const updateProject = async () => {
       if (!selectedProject || !selectedProject.id) return;
-      
       if (!editProjectTitle.trim()) {
         Alert.alert('Error', 'Please enter a project title');
         return;
@@ -574,35 +463,26 @@
         Alert.alert('Error', 'Please enter project description');
         return;
       }
-
       setUpdatingProject(true);
       try {
-        await Firestore()
-          .collection('collaborations')
-          .doc(selectedProject.id)
-          .update({
-            title: editProjectTitle.trim(),
-            about: editProjectAbout.trim(),
-            tech: editProjectTech.trim(),
-            githubRepo: editGithubRepo.trim(),
-            updatedAt: Firestore.FieldValue.serverTimestamp(),
-          });
-
-        // Update local state
-        setCollaborationProjects(prev => 
-          prev.map(p => 
-            p.id === selectedProject.id 
+        await functions().httpsCallable('updateCollaboration')({
+          projectId: selectedProject.id,
+          title: editProjectTitle.trim(),
+          about: editProjectAbout.trim(),
+          tech: editProjectTech.trim(),
+          githubRepo: editGithubRepo.trim(),
+        });
+        setCollaborationProjects(prev =>
+          prev.map(p =>
+            p.id === selectedProject.id
               ? { ...p, title: editProjectTitle.trim(), about: editProjectAbout.trim(), tech: editProjectTech.trim(), githubRepo: editGithubRepo.trim() }
               : p
           )
         );
-
         Alert.alert('Success', 'Project updated successfully!');
         closeProjectEditModal();
-        // Refresh projects list
         await fetchCollaborationProjects();
       } catch (error) {
-        
         Alert.alert('Error', 'Failed to update project');
       } finally {
         setUpdatingProject(false);
@@ -610,76 +490,28 @@
     };
 
 
-    // Fetch user's questions from Firestore
     const fetchUserQuestions = async (userId) => {
       setLoadingQuestions(true);
       try {
-        const questionsSnapshot = await Firestore()
-          .collection('questions')
-          .where('authorId', '==', userId)
-          .orderBy('timestamp', 'desc')
-          .limit(10)
-          .get();
-
-        const questions = questionsSnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-
+        const result = await functions().httpsCallable('getUserQuestions')({ userId, limit: 10 });
+        const questions = result.data?.questions || [];
         setUserQuestions(questions);
       } catch (error) {
-        
-        try {
-          const questionsSnapshot = await Firestore()
-            .collection('questions')
-            .where('authorId', '==', userId)
-            .limit(10)
-            .get();
-
-          const questions = questionsSnapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data()
-          }));
-
-          setUserQuestions(questions);
-        } catch (secondError) {
-          
-          setUserQuestions([]);
-        }
+        setUserQuestions([]);
       } finally {
         setLoadingQuestions(false);
       }
     };
 
-    const getProfileDocument = async (userId) => {
+    const createNotification = async (recipientUid, type, notificationData) => {
       try {
-        const profileRef = Firestore().collection('profile').doc(userId);
-        const profileDoc = await profileRef.get();
-        
-        if (profileDoc.exists) {
-          return profileDoc.data();
-        } else {
-          
-          return null;
-        }
-      } catch (error) {
-        
-        return null;
-      }
-    };
-
-    const createNotification = async (recipientUid, type, data) => {
-      try {
-        await Firestore().collection('notifications').add({
+        await functions().httpsCallable('createNotification')({
           recipientUid,
-          senderUid: currentUser.uid,
           type,
-          data,
-          read: false,
-          createdAt: Firestore.FieldValue.serverTimestamp(),
+          notificationData: notificationData || {},
         });
       } catch (error) {
-        
+        // silent
       }
     };
 
@@ -688,20 +520,21 @@
         setLoading(false);
         return;
       }
-      
       try {
-        const userDoc = await Firestore().collection('users').doc(viewedUserId).get();
-        if (userDoc.exists) {
-          const userData = userDoc.data();
-          setUserData(userData);
-          setDisplayName(userData.username || 'Developer');
-        } else if (isOwnProfile) {
+        const getProfileData = functions().httpsCallable('getProfileData');
+        const result = await getProfileData({ userId: viewedUserId });
+        const { userData, profileData, isFollowing: following, canViewContent: _ } = result.data || {};
+
+        if (!userData && isOwnProfile) {
           Alert.alert('Error', 'User profile not found. Please contact support.');
           setLoading(false);
           return;
         }
 
-        const profileData = await getProfileDocument(viewedUserId);
+        if (userData) {
+          setUserData(userData);
+          setDisplayName(userData.username || 'Developer');
+        }
         if (profileData) {
           setUserProfile(profileData);
           setAvatarUrl(profileData.avatar || 'https://cdn.britannica.com/84/232784-050-1769B477/Siberian-Husky-dog.jpg');
@@ -721,12 +554,8 @@
           setUserProfile(defaultProfile);
           setAvatarUrl(defaultProfile.avatar);
         }
-
-        // if (activeTab === 'questions') {
-        //   fetchUserQuestions(viewedUserId);
-        // }
+        if (typeof following === 'boolean') setIsFollowing(following);
       } catch (error) {
-        
         Alert.alert('Error', 'Failed to load profile data.');
         setUserData(null);
         setUserProfile(null);
@@ -746,23 +575,16 @@
     }, [activeTab, viewedUserId]);
 
     useEffect(() => {
-      if (!isOwnProfile && currentUser?.uid) {
+      if (!isOwnProfile && currentUser?.uid && viewedUserId) {
         const checkFollowing = async () => {
           try {
-            const doc = await Firestore()
-              .collection('profile')
-              .doc(currentUser.uid)
-              .collection('following')
-              .doc(viewedUserId)
-              .get();
-            setIsFollowing(doc.exists);
+            const result = await functions().httpsCallable('isFollowing')({ targetUserId: viewedUserId });
+            setIsFollowing(result.data?.isFollowing ?? false);
           } catch {
             setIsFollowing(false);
           }
         };
         checkFollowing();
-
-        
       }
     }, [currentUser?.uid, viewedUserId, isOwnProfile]);
 
@@ -774,128 +596,41 @@
 
     const ensureProfileExists = async (userId) => {
       try {
-        const profileRef = Firestore().collection('profile').doc(userId);
-        const profileDoc = await profileRef.get();
-
-        if (!profileDoc.exists) {
-          const initialProfile = {
-            followersCount: 0,
-            followingCount: 0,
-            postsCount: 0,
-            questionsCount: 0,
-            answersCount: 0,
-            avatar: 'https://cdn.britannica.com/84/232784-050-1769B477/Siberian-Husky-dog.jpg',
-            bio: '',
-            location: '',
-            website: '',
-            joinedDate: new Date().toLocaleDateString(),
-            isPrivate: false,
-            createdAt: Firestore.FieldValue.serverTimestamp(),
-            updatedAt: Firestore.FieldValue.serverTimestamp()
-          };
-
-          await profileRef.set(initialProfile);
-          
-          return initialProfile;
-        }
-        return profileDoc.data();
+        await functions().httpsCallable('ensureProfileExists')({ userId });
       } catch (error) {
-        
         throw error;
       }
     };
 
     const sendFollowRequest = async () => {
       if (isOwnProfile || !currentUser?.uid) return;
-      
       try {
-        const currentUserDoc = await Firestore().collection('users').doc(currentUser.uid).get();
-        const currentUsername = currentUserDoc.exists ? currentUserDoc.data()?.username || 'User' : 'User';
-
-        await ensureProfileExists(currentUser.uid);
-        await ensureProfileExists(viewedUserId);
-
-        const alreadyRequestedSnap = await Firestore()
-          .collection('profile')
-          .doc(viewedUserId)
-          .collection('followRequests')
-          .where('from', '==', currentUser.uid)
-          .limit(1)
-          .get();
-
-        if (!alreadyRequestedSnap.empty) {
-          Alert.alert('Request pending', 'You have already sent a follow request.');
-          return;
-        }
-
-        if (isFollowing) {
-          Alert.alert('Already following');
-          return;
-        }
-
-        await Firestore()
-          .collection('profile')
-          .doc(viewedUserId)
-          .collection('followRequests')
-          .add({
-            from: currentUser.uid,
-            fromUsername: currentUsername,
-            createdAt: Firestore.FieldValue.serverTimestamp(),
-          });
-
-        await createNotification(viewedUserId, 'follow_request', {
-          message: 'sent you a follow request',
-          senderUsername: currentUsername
-        });
-
+        await functions().httpsCallable('sendFollowRequest')({ targetUserId: viewedUserId });
         Alert.alert('Success', 'Follow request sent! The user will be notified.');
       } catch (error) {
-      
-        Alert.alert('Error', 'Could not send follow request.');
+        const code = error?.code || error?.details?.code;
+        const msg = error?.message || '';
+        if (code === 'functions/failed-precondition') {
+          if (msg.includes('already sent')) Alert.alert('Request pending', 'You have already sent a follow request.');
+          else if (msg.includes('Already following')) Alert.alert('Already following');
+          else Alert.alert('Error', msg);
+        } else {
+          Alert.alert('Error', 'Could not send follow request.');
+        }
       }
     };
 
     const unfollow = async () => {
       if (isOwnProfile || !currentUser?.uid) return;
-      
       try {
-        await ensureProfileExists(currentUser.uid);
-        await ensureProfileExists(viewedUserId);
-
-        const batch = Firestore().batch();
-
-        const followerRef = Firestore().collection('profile').doc(viewedUserId)
-          .collection('followers').doc(currentUser.uid);
-        batch.delete(followerRef);
-
-        const followingRef = Firestore().collection('profile').doc(currentUser.uid)
-          .collection('following').doc(viewedUserId);
-        batch.delete(followingRef);
-
-        const viewedUserProfileRef = Firestore().collection('profile').doc(viewedUserId);
-        const currentUserProfileRef = Firestore().collection('profile').doc(currentUser.uid);
-
-        batch.update(viewedUserProfileRef, {
-          followersCount: Firestore.FieldValue.increment(-1),
-          updatedAt: Firestore.FieldValue.serverTimestamp()
-        });
-        batch.update(currentUserProfileRef, {
-          followingCount: Firestore.FieldValue.increment(-1),
-          updatedAt: Firestore.FieldValue.serverTimestamp()
-        });
-
-        await batch.commit();
-
+        await functions().httpsCallable('unfollow')({ targetUserId: viewedUserId });
         setIsFollowing(false);
-
         setUserProfile(prev => prev ? ({
           ...prev,
           followersCount: Math.max(0, (prev.followersCount || 0) - 1)
         }) : prev);
-
         Alert.alert('Success', 'You are no longer following this user.');
       } catch (error) {
-        
         Alert.alert('Error', 'Failed to unfollow user.');
       }
     };
@@ -934,45 +669,30 @@
 
     const uploadPost = async () => {
       if (!selectedImage || !currentUser) return;
-      
       setUploading(true);
       try {
         await ensureProfileExists(currentUser.uid);
-
         const imageName = `posts/${currentUser.uid}/${Date.now()}_${selectedImage.fileName || 'image.jpg'}`;
         const reference = storage().ref(imageName);
         await reference.putFile(selectedImage.uri);
         const imageUrl = await reference.getDownloadURL();
 
-        const postData = {
-          userId: currentUser.uid,
-          username: displayName,
-          userAvatar: avatarUrl,
+        await functions().httpsCallable('createPost')({
           imageUrl,
           caption,
-          createdAt: Firestore.FieldValue.serverTimestamp(),
-          likes: 0,
-          likedBy: [],
-        };
-
-        await Firestore().collection('posts').add(postData);
-
-        await Firestore().collection('profile').doc(currentUser.uid).update({
-          postsCount: Firestore.FieldValue.increment(1),
-          updatedAt: Firestore.FieldValue.serverTimestamp()
+          username: displayName,
+          userAvatar: avatarUrl,
         });
 
         setUserProfile(prev => prev ? ({
           ...prev,
           postsCount: (prev.postsCount || 0) + 1
         }) : prev);
-
         setSelectedImage(null);
         setCaption('');
         setUploadModalVisible(false);
         Alert.alert('Success', 'Post uploaded successfully!');
       } catch (error) {
-        
         Alert.alert('Error', 'Failed to upload post.');
       } finally {
         setUploading(false);
@@ -981,45 +701,32 @@
 
     const handleAvatarChange = async () => {
       if (!isOwnProfile || !currentUser) return;
-
-      const haspermission=await requestgallerypermission();
-      if(!haspermission){
-        return;
-      }
-      
+      const haspermission = await requestgallerypermission();
+      if (!haspermission) return;
       try {
         const result = await launchImageLibrary({
           mediaType: 'photo',
           quality: 0.7,
           includeBase64: false,
         });
-
         if (result.assets && result.assets.length > 0) {
           const image = result.assets[0];
           Alert.alert('Uploading', 'Please wait while we update your profile picture...');
-          
           await ensureProfileExists(currentUser.uid);
-          
           const fileName = `avatar${currentUser.uid}_${Date.now()}.jpg`;
           const reference = storage().ref(`avatars/${currentUser.uid}/${fileName}`);
           await reference.putFile(image.uri);
           const downloadUrl = await reference.getDownloadURL();
 
-          await Firestore().collection('profile').doc(currentUser.uid).update({
-            avatar: downloadUrl,
-            updatedAt: Firestore.FieldValue.serverTimestamp()
-          });
+          await functions().httpsCallable('updateAvatar')({ avatarUrl: downloadUrl });
+
+          
 
           setAvatarUrl(downloadUrl);
-          setUserProfile(prev => prev ? ({
-            ...prev,
-            avatar: downloadUrl
-          }) : prev);
-
+          setUserProfile(prev => prev ? ({ ...prev, avatar: downloadUrl }) : prev);
           Alert.alert('Success', 'Profile picture updated!');
         }
       } catch (error) {
-        
         Alert.alert('Error', 'Failed to update profile picture.');
       }
     };
@@ -1065,35 +772,14 @@
             onPress: async () => {
               try {
                 setLoadingQuestions(true);
-
-                await Firestore().runTransaction(async (transaction) => {
-                  const questionRef = Firestore().collection('questions').doc(questionId);
-                  const profileRef = Firestore().collection('profile').doc(currentUser.uid);
-                  
-                  const profileDoc = await transaction.get(profileRef);
-                  
-                  transaction.delete(questionRef);
-                  
-                  if (profileDoc.exists) {
-                    const currentCount = profileDoc.data().questionsCount || 0;
-                    const newCount = Math.max(0, currentCount - 1);
-                    
-                    transaction.update(profileRef, {
-                      questionsCount: newCount,
-                      updatedAt: Firestore.FieldValue.serverTimestamp()
-                    });
-                  }
-                });
-
+                await functions().httpsCallable('deleteQuestion')({ questionId });
                 setUserQuestions(prev => prev.filter(q => q.id !== questionId));
                 setUserProfile(prev => prev ? ({
                   ...prev,
                   questionsCount: Math.max(0, (prev.questionsCount || 0) - 1)
                 }) : prev);
-
                 Alert.alert('Deleted', 'Your question has been deleted.');
               } catch (error) {
-                
                 Alert.alert('Error', 'Could not delete question. Please try again.');
               } finally {
                 setLoadingQuestions(false);
@@ -1104,34 +790,31 @@
       );
     };
 
-    const deleteprojects = async (projectId,projectTitle)=>{
+    const deleteprojects = async (projectId, projectTitle) => {
       Alert.alert(
         'Delete this project',
         `Are you sure you want to delete "${projectTitle}"?`,
         [
-          {text:'cancel',style:'cancel'},
+          { text: 'Cancel', style: 'cancel' },
           {
-            text:'Delete',
-            style:'destructive',
-            onPress:async()=>{
+            text: 'Delete',
+            style: 'destructive',
+            onPress: async () => {
               setDeletingProject(true);
-              try{
-                await Firestore().collection('collaborations').doc(projectId).delete();
-                setCollaborationProjects(prev=>prev.filter(p=>p.id!==projectId));
-                Alert.alert('Deleted','Project has been deleted.');
-              }catch(error){
-                Alert.alert('Error','Could not delete project. Please try again.');
-              }finally{
+              try {
+                await functions().httpsCallable('deleteCollaboration')({ projectId });
+                setCollaborationProjects(prev => prev.filter(p => p.id !== projectId));
+                Alert.alert('Deleted', 'Project has been deleted.');
+              } catch (error) {
+                Alert.alert('Error', 'Could not delete project. Please try again.');
+              } finally {
                 setDeletingProject(false);
               }
-
             }
           }
-        
         ]
-        
-      )
-    }
+      );
+    };
 
 
     const renderTabContent = () => {
@@ -1900,9 +1583,9 @@
                 </Text>
               </TouchableOpacity>
               
-              <TouchableOpacity style={styles.buttonSecondary} onPress={() => Alert.alert('Message feature to be implemented')}>
+              {/* <TouchableOpacity style={styles.buttonSecondary} onPress={() => Alert.alert('Message feature to be implemented')}>
                 <Text style={styles.textDark}>Message</Text>
-              </TouchableOpacity>
+              </TouchableOpacity> */}
             </View>
           )}
 
@@ -2196,7 +1879,9 @@
     statsContainer: { 
       flexDirection: 'row', 
       justifyContent: 'space-between', 
-      flex: 1 
+      flex: 1 ,
+      marginLeft:20,
+      marginRight:20
     },
     statBox: { 
       alignItems: 'center' 
@@ -2229,10 +1914,11 @@
       marginBottom: 2 
     },
     buttonsContainer: { 
-      flexDirection: 'row', 
+      // flexDirection: 'row', 
       justifyContent: 'space-between', 
       gap: 10, 
-      marginBottom: 20 
+      marginBottom: 20, 
+      width:100
     },
     button: { 
       flex: 1, 

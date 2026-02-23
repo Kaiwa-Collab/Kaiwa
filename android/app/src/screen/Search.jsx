@@ -1,13 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { 
   StyleSheet, Text, View, FlatList, ActivityIndicator, TextInput, 
   TouchableOpacity, Alert, Image, StatusBar, Platform, Linking
 } from 'react-native';
 import Ionicons from 'react-native-vector-icons/Ionicons';
-import firestore from '@react-native-firebase/firestore';
 import auth from '@react-native-firebase/auth';
 import functions from '@react-native-firebase/functions';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useUserData } from '../users'; 
 
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
@@ -36,63 +35,40 @@ const Search = () => {
     getCachedImageUri,
   } = useUserData();
 
-  useEffect(() => {
-    const unsubscribe = firestore()
-      .collection('profile')
-      .doc(currentUserUid)
-      .collection('followRequests')
-      .onSnapshot(snapshot => {
-        setRequestsCount(snapshot.docs.length);
-      });
+  const fetchFollowRequestsCount = useCallback(async () => {
+    try {
+      const result = await functions().httpsCallable('getFollowRequestsCount')();
+      setRequestsCount(result.data?.count ?? 0);
+    } catch {
+      setRequestsCount(0);
+    }
+  }, []);
 
-    return unsubscribe;
-  }, [currentUserUid]);
+  const fetchSearchSuggestions = useCallback(async () => {
+    try {
+      const result = await functions().httpsCallable('getSearchSuggestions')({ limit: 20 });
+      setSuggestedAccounts(result.data?.suggestions ?? []);
+    } catch {
+      setSuggestedAccounts([]);
+    }
+  }, []);
 
-  useEffect(() => {
-    const unsubscribe = firestore()
-      .collection('profile')
-      .doc(currentUserUid)
-      .collection('searchSuggestions')
-      .orderBy('lastUsedAt', 'desc')
-      .limit(20)
-      .onSnapshot(
-        snapshot => {
-          const list = snapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data(),
-          }));
-          setSuggestedAccounts(list);
-        },
-        () => {
-          // Ignore errors
-        }
-      );
+  const fetchProjectSuggestions = useCallback(async () => {
+    try {
+      const result = await functions().httpsCallable('getProjectSuggestions')({ limit: 20 });
+      setSuggestedProjects(result.data?.suggestions ?? []);
+    } catch {
+      setSuggestedProjects([]);
+    }
+  }, []);
 
-    return unsubscribe;
-  }, [currentUserUid]);
-   
-  useEffect(() => {
-    const unsubscribe = firestore()
-      .collection('profile')
-      .doc(currentUserUid)
-      .collection('projectSuggestions')
-      .orderBy('lastUsedAt', 'desc')
-      .limit(20)
-      .onSnapshot(
-        snapshot => {
-          const list = snapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data(),
-          }));
-          setSuggestedProjects(list);
-        },
-        () => {
-          // Ignore errors
-        }
-      );
-
-    return unsubscribe;
-  }, [currentUserUid]);
+  useFocusEffect(
+    useCallback(() => {
+      fetchFollowRequestsCount();
+      fetchSearchSuggestions();
+      fetchProjectSuggestions();
+    }, [fetchFollowRequestsCount, fetchSearchSuggestions, fetchProjectSuggestions])
+  );
 
   // ✅ Load trends on mount (always visible)
   useEffect(() => {
@@ -140,49 +116,15 @@ const Search = () => {
       setUsers([]);
       return;
     }
-    
     if (text.trim().length < 3) {
       setUsers([]);
       return;
     }
-
     setLoading(true);
     try {
-      let querySnapshot = await firestore()
-        .collection('profile')
-        .orderBy('username')
-        .startAt(text.toLowerCase())
-        .endAt(text.toLowerCase() + '\uf8ff')
-        .limit(20)
-        .get();
-
-      let usersList = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-
-      if (usersList.length === 0) {
-        const allUsersSnapshot = await firestore()
-          .collection('profile')
-          .limit(100)
-          .get();
-
-        const allUsers = allUsersSnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
-
-        usersList = allUsers.filter(user => {
-          const username = (user.username || '').toLowerCase();
-          const name = (user.name || '').toLowerCase();
-          const searchLower = text.toLowerCase();
-          
-          return username.includes(searchLower) || name.includes(searchLower);
-        });
-      }
-
-      const filteredUsers = usersList.filter(user => user.id !== currentUserUid);
-      setUsers(filteredUsers);
+      const result = await functions().httpsCallable('searchPageUsers')({ query: text.trim(), limit: 20 });
+      const usersList = result.data?.users ?? [];
+      setUsers(usersList);
     } catch (err) {
       Alert.alert('Search Error', 'Could not search users. Please try again.');
       setUsers([]);
@@ -200,41 +142,10 @@ const Search = () => {
       setProjects([]);
       return;
     }
-
     setLoading(true);
     try {
-      let querySnapshot = await firestore()
-        .collection('collaborations')
-        .orderBy('title')
-        .startAt(text.toLowerCase())
-        .endAt(text.toLowerCase() + '\uf8ff')
-        .limit(20)
-        .get();
-
-      let projectsList = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-
-      if (projectsList.length === 0) {
-        const allProjectsSnapshot = await firestore()
-          .collection('collaborations')
-          .limit(100)
-          .get();
-
-        const allProjects = allProjectsSnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
-
-        projectsList = allProjects.filter(project => {
-          const title = (project.title || '').toLowerCase();
-          const description = (project.description || '').toLowerCase();
-          const searchLower = text.toLowerCase();
-          
-          return title.includes(searchLower) || description.includes(searchLower);
-        });
-      }
+      const result = await functions().httpsCallable('searchProjects')({ query: text.trim(), limit: 20 });
+      const projectsList = result.data?.projects ?? [];
       setProjects(projectsList);
     } catch (err) {
       Alert.alert('Search Error', 'Could not search projects. Please try again.');
@@ -276,21 +187,15 @@ const Search = () => {
   const saveSuggestion = async (user) => {
     try {
       if (!user?.id) return;
-
-      await firestore()
-        .collection('profile')
-        .doc(currentUserUid)
-        .collection('searchSuggestions')
-        .doc(user.id)
-        .set(
-          {
-            username: user.username || user.name || '',
-            name: user.name || '',
-            avatar: user.avatar || user.photoURL || null,
-            lastUsedAt: firestore.FieldValue.serverTimestamp(),
-          },
-          { merge: true }
-        );
+      await functions().httpsCallable('saveSearchSuggestion')({
+        userId: user.id,
+        userData: {
+          username: user.username || user.name,
+          name: user.name,
+          avatar: user.avatar || user.photoURL,
+        },
+      });
+      fetchSearchSuggestions();
     } catch (e) {
       // Silently ignore
     }
@@ -299,21 +204,15 @@ const Search = () => {
   const saveprojectSuggestion = async (project) => {
     try {
       if (!project?.id) return;
-
-      await firestore()
-        .collection('profile')
-        .doc(currentUserUid)
-        .collection('projectSuggestions')
-        .doc(project.id)
-        .set(
-          {
-            title: project.title || '',
-            description: project.description || '',
-            image: project.image || null,
-            lastUsedAt: firestore.FieldValue.serverTimestamp(),
-          },
-          { merge: true }
-        );
+      await functions().httpsCallable('saveProjectSuggestion')({
+        projectId: project.id,
+        projectData: {
+          title: project.title,
+          description: project.description || project.about,
+          image: project.image,
+        },
+      });
+      fetchProjectSuggestions();
     } catch (e) {
       // Silently ignore
     }
@@ -321,12 +220,8 @@ const Search = () => {
 
   const handleRemoveSuggestion = async (userId) => {
     try {
-      await firestore()
-        .collection('profile')
-        .doc(currentUserUid)
-        .collection('searchSuggestions')
-        .doc(userId)
-        .delete();
+      await functions().httpsCallable('removeSearchSuggestion')({ userId });
+      fetchSearchSuggestions();
     } catch (e) {
       // Ignore
     }
@@ -334,12 +229,8 @@ const Search = () => {
 
   const handleRemoveProjectSuggestion = async (projectId) => {
     try {
-      await firestore()
-        .collection('profile')
-        .doc(currentUserUid)
-        .collection('projectSuggestions')
-        .doc(projectId)
-        .delete();
+      await functions().httpsCallable('removeProjectSuggestion')({ projectId });
+      fetchProjectSuggestions();
     } catch (e) {
       // Ignore
     }

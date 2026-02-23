@@ -11,6 +11,7 @@ replay_pid*
 
 # Environment files
 .env
+serviceAccountKey.json
 
 # Android
 android/.gradle/
@@ -20,9 +21,6 @@ android/local.properties
 android/.cxx/
 android/app/google-services.json
 android/app/src/config/
-PRESENCE_FIX_SUMMARY.md
-WRITE_OPTIMIZATION_ANALYSIS.md
-FUNCTION_READ_COUNT_ANALYSIS
 
 # iOS
 ios/Pods/
@@ -37,3 +35,16 @@ npx/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Certificates / keys
+*.pem
+*.key
+
+# Analysis / docs (optional)
+PRESENCE_FIX_SUMMARY.md
+WRITE_OPTIMIZATION_ANALYSIS.md
+FUNCTION_READ_COUNT_ANALYSIS.md
+
+# Separate repos / local folders
+chat-server/
+firebase/

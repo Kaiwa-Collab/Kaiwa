@@ -24,8 +24,15 @@
     "@react-navigation/native": "^7.1.14",
     "@react-navigation/native-stack": "^7.3.21",
     "@react-navigation/stack": "^7.4.2",
+    "axios": "^1.13.4",
+    "compression": "^1.8.1",
+    "helmet": "^8.1.0",
     "install": "^0.13.0",
+    "joi": "^18.0.2",
+    "lru-cache": "^11.2.6",
+    "morgan": "^1.10.1",
     "npm": "^11.4.2",
+    "rate-limiter-flexible": "^9.1.1",
     "react": "19.1.0",
     "react-native": "0.80.0",
     "react-native-dotenv": "^3.4.11",
@@ -39,7 +46,10 @@
     "react-native-safe-area-context": "^5.5.0",
     "react-native-screens": "^4.11.1",
     "react-native-vector-icons": "^10.3.0",
-    "react-native-video": "^6.18.0"
+    "react-native-video": "^6.18.0",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3",
+    "winston": "^3.19.0"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

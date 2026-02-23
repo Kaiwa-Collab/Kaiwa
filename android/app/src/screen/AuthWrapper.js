@@ -1,11 +1,13 @@
-import React, { useState, useEffect } from 'react';
+// AuthWrapper.js - UPDATED with WebSocket Connection Management
+import React, { useState, useEffect,useRef } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { StatusBar } from 'react-native'; // Added StatusBar import
+import { StatusBar } from 'react-native';
 import auth from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
 import signUp_G from './signUp_G';
 import presenceService from './presenceService';
+import wsChatService from '../../service/wsChatService';// ADD THIS IMPORT
 
 import HomeScreen from './HomeScreen';
 import SignUp from './SignUp';
@@ -15,10 +17,11 @@ import CommentScreen from './CommentScreen';
 import Settings from './Settings';
 import Username from './Username';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
-// import ChatScreen from './ChatScreen';
 import MessageRequestsScreen from './MessageRequestsScreen';
 
 const Stack = createNativeStackNavigator();
+
+
 
 function AppNavigator({ user, hasUsername }) {
   // Determine initial route based on user state
@@ -33,7 +36,6 @@ function AppNavigator({ user, hasUsername }) {
   };
 
   return (
-    
     <Stack.Navigator 
       screenOptions={{ headerShown: false }}
       initialRouteName={getInitialRouteName()}
@@ -53,8 +55,6 @@ function AppNavigator({ user, hasUsername }) {
               </>
             )}
             <Stack.Screen name="ChatScreen" component={ChatScreen} />
-            
-          
             <Stack.Screen name="Settings" component={Settings} />
             <Stack.Screen
               name="CommentScreen"
@@ -64,7 +64,7 @@ function AppNavigator({ user, hasUsername }) {
                 headerStyle: {
                   backgroundColor: '#1e1e1e' },
                 headerTintColor: '#fff',
-            headerTitleStyle: {fontWeight: 'bold' },
+                headerTitleStyle: {fontWeight: 'bold' },
               }}
             />
           </>
@@ -83,7 +83,6 @@ function AppNavigator({ user, hasUsername }) {
           <Stack.Screen name="Username" component={Username} />
         </>
       )}
-
     </Stack.Navigator>
   );
 }
@@ -93,6 +92,11 @@ export default function AuthWrapper() {
   const [user, setUser] = useState(null);
   const [hasUsername, setHasUsername] = useState(false);
   const [checkingUsername, setCheckingUsername] = useState(true);
+  const wsInitializedRef = useRef(false);
+  
+const wsRetryCount = useRef(0);
+const MAX_WS_RETRIES = 3;
+
 
   useEffect(() => {
     const unsubscribe = auth().onAuthStateChanged(async (user) => {
@@ -110,6 +114,30 @@ export default function AuthWrapper() {
           // Initialize presence tracking for authenticated users
           if (userData && userData.username) {
             presenceService.initialize(user.uid);
+            
+            // ========================================
+            // NEW: Initialize WebSocket Connection
+            // ========================================
+           // Initialize WebSocket Connection (ONLY ONCE)
+
+if (userData && userData.username && !wsInitializedRef.current) {
+  if (wsRetryCount.current >= MAX_WS_RETRIES) {
+    console.error('Max WebSocket retry attempts reached');
+    return;
+  }
+  
+  wsInitializedRef.current = true;
+  wsRetryCount.current++;
+  
+  try {
+    await wsChatService.connect();
+    wsRetryCount.current = 0; // Reset on success
+  } catch (error) {
+    console.error('❌ Failed to connect WebSocket:', error);
+    wsInitializedRef.current = false;
+  }
+}
+
           }
         } catch (error) {
           console.error('Error checking username:', error);
@@ -120,8 +148,20 @@ export default function AuthWrapper() {
       } else {
         setHasUsername(false);
         setCheckingUsername(false);
+        
         // Cleanup presence tracking when user logs out
         presenceService.cleanup();
+        
+        // ========================================
+        // NEW: Disconnect WebSocket on logout
+        // ========================================
+        if (wsChatService.isConnected) {
+  console.log('🔌 Disconnecting WebSocket...');
+  wsChatService.disconnect();
+  wsInitializedRef.current = false; // ✅ reset guard
+  console.log('✅ WebSocket disconnected');
+}
+
       }
     });
     
@@ -129,6 +169,7 @@ export default function AuthWrapper() {
       unsubscribe();
       // Cleanup presence service on unmount
       presenceService.cleanup();
+      // Note: Don't disconnect WebSocket here - only on logout
     };
   }, [initializing]);
 
@@ -136,7 +177,6 @@ export default function AuthWrapper() {
 
   return (
     <>
-      {/* StatusBar configuration for dark content on light background */}
       <StatusBar 
         barStyle="dark-content" 
         backgroundColor="#ffffff" 
@@ -149,4 +189,3 @@ export default function AuthWrapper() {
     </>
   );
 }
-//do not add navigation back to home page after logout or deletions as authcjange will handle it 
