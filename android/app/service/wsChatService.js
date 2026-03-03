@@ -18,7 +18,9 @@ class SimpleLRUCache {
     this.maxAge = options.maxAge || Infinity;
     this.cache = new Map();
     this.accessOrder = [];
+    
   }
+
 
   set(key, value) {
     if (this.cache.has(key)) {
@@ -79,7 +81,7 @@ class WebSocketChatService {
       max: 100,
       maxAge: 30 * 60 * 1000,
     });
-
+    this.messageCacheTimestamps = new Map();
     this.listeners = new Map();
     this.presenceMap = new Map();
     this.reconnectAttempts = 0;
@@ -381,6 +383,7 @@ class WebSocketChatService {
 
       if (data.messages && Array.isArray(data.messages)) {
         this.messageCache.set(chatId, data.messages);
+        this.messageCacheTimestamps.set(chatId, Date.now());
       }
 
       return data;
@@ -565,6 +568,12 @@ class WebSocketChatService {
     return this.messageCache.get(chatId) || null;
   }
 
+  getCacheAge(chatId) {
+  const ts = this.messageCacheTimestamps.get(chatId);
+  if (!ts) return Infinity;
+  return Date.now() - ts;
+}
+
   addMessageToCache(chatId, message) {
     if (!chatId || !message?.id) return;
     const cached = this.messageCache.get(chatId) || [];
@@ -580,6 +589,15 @@ class WebSocketChatService {
     const cached = this.messageCache.get(chatId);
     if (cached) this.messageCache.set(chatId, cached.map(m => m.id === message.id ? message : m));
   }
+
+  
+appendOlderMessagesToCache(chatId, olderMessages) {
+  if (!chatId || !olderMessages?.length) return;
+  const cached = this.messageCache.get(chatId) || [];
+  const existingIds = new Set(cached.map(m => m.id));
+  const newOnes = olderMessages.filter(m => !existingIds.has(m.id));
+  this.messageCache.set(chatId, [...cached, ...newOnes]);
+}
 
   removeMessageFromCache(chatId, messageId) {
     if (!chatId || !messageId) return;

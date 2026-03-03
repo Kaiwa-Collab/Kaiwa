@@ -29,6 +29,7 @@ const HomeScreen = () => {
   const [password, setPassword] = useState('');
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [logoLoaded, setLogoLoaded] = useState(false);
 
  
 
@@ -323,6 +324,9 @@ const HomeScreen = () => {
           <Image
           source={require('../../../../assets/image/logo4.png')}
           style={{ width: 150, height: 150, marginTop: 50,borderRadius:1000,borderWidth:1,borderColor:'white' }}
+           onLoad={() => setLogoLoaded(true)}
+           onError={() => setLogoLoaded(false)}
+          fadeDuration={0}  
         />
         </View>
 

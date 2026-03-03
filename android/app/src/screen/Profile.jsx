@@ -47,6 +47,7 @@
     const [userQuestions, setUserQuestions] = useState([]);
     const [loadingQuestions, setLoadingQuestions] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
+    const [requestSent, setRequestSent] = useState(false);
 
     // Collaboration Modal States
     const [collaborationModalVisible, setCollaborationModalVisible] = useState(false);
@@ -606,13 +607,16 @@
       if (isOwnProfile || !currentUser?.uid) return;
       try {
         await functions().httpsCallable('sendFollowRequest')({ targetUserId: viewedUserId });
+        setRequestSent(true)
         Alert.alert('Success', 'Follow request sent! The user will be notified.');
       } catch (error) {
         const code = error?.code || error?.details?.code;
         const msg = error?.message || '';
         if (code === 'functions/failed-precondition') {
-          if (msg.includes('already sent')) Alert.alert('Request pending', 'You have already sent a follow request.');
-          else if (msg.includes('Already following')) Alert.alert('Already following');
+          if (msg.includes('already sent')){
+            setRequestSent(true)
+             Alert.alert('Request pending', 'You have already sent a follow request.');
+          }else if (msg.includes('Already following')) Alert.alert('Already following');
           else Alert.alert('Error', msg);
         } else {
           Alert.alert('Error', 'Could not send follow request.');
@@ -636,6 +640,7 @@
     };
 
     const handleFollowPress = () => {
+      if(requestSent) return
       if (isFollowing) {
         Alert.alert(
           'Unfollow',
@@ -1575,11 +1580,11 @@
           {!isOwnProfile && (
             <View style={styles.buttonsContainer}>
               <TouchableOpacity
-                style={[styles.button, isFollowing ? styles.following : styles.follow]}
+                style={[styles.button, isFollowing ? styles.following :requestSent? styles.requestSent: styles.follow]}
                 onPress={handleFollowPress}
               >
                 <Text style={[styles.buttonText, isFollowing ? styles.textDark : styles.textLight]}>
-                  {isFollowing ? 'Following' : 'Follow'}
+                  {isFollowing ? 'Following' :requestSent?'sent':'Follow'}
                 </Text>
               </TouchableOpacity>
               
@@ -2710,6 +2715,11 @@
       fontWeight: '600',
       fontSize: 16,
     },
+    requestSent: {
+  backgroundColor: '#555',
+  borderWidth: 1,
+  borderColor: '#888',
+},
   });
 
   export default Profile;

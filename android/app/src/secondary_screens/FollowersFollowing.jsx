@@ -56,7 +56,7 @@ const FollowersFollowing = () => {
               const data = profileDoc.data();
               return {
                 id: userId,
-                name: data.name || data.displayName || 'Unknown User',
+                // name: data.name || data.displayName || 'Unknown User',
                 username: data.username || '',
                 avatar: data.avatar || data.photoURL || null,
               };
@@ -107,7 +107,7 @@ const FollowersFollowing = () => {
               const data = profileDoc.data();
               return {
                 id: userId,
-                name: data.name || data.displayName || 'Unknown User',
+                // name: data.name || data.displayName || 'Unknown User',
                 username: data.username || '',
                 avatar: data.avatar || data.photoURL || null,
               };
@@ -163,9 +163,9 @@ const FollowersFollowing = () => {
         )}
       </View>
       <View style={styles.userInfo}>
-        <Text style={styles.userName}>{item.name}</Text>
+        {/* <Text style={styles.userName}>{item.name}</Text> */}
         {item.username && (
-          <Text style={styles.userUsername}>@{item.username}</Text>
+          <Text style={styles.userUsername}>{item.username}</Text>
         )}
       </View>
     </TouchableOpacity>
@@ -335,7 +335,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   userUsername: {
-    color: 'rgba(255, 255, 255, 0.6)',
+    color: 'white',
     fontSize: 14,
     marginTop: 2,
   },

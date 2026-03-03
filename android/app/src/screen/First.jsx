@@ -180,6 +180,7 @@ function CustomDrawerContent({ navigation }) {
         (doc) => {
           if (!doc.exists) return;
           const data = doc.data();
+          if (!data) return; 
           const conversations = data.conversations || [];
           const messageRequests = {
             received: data.messageRequests?.received || [],
@@ -417,7 +418,7 @@ const handleRefresh = React.useCallback(() => {
         navigation.getParent().navigate('ChatScreen', {
           chatId: chatDocId,
           title: item.displayName || item.name || item.username || 'Unknown User',
-          avatar: getCachedImageUri(item.avatar || item.photoURL || ''),
+          avatar: getCachedImageUri(chatAvatar),
           userId: item.id,
         });
         return;

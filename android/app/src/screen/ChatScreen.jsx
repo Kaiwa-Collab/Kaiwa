@@ -71,6 +71,10 @@ export default function ChatScreen({ route, navigation }) {
   const [isTyping, setIsTyping] = useState(false);
   const [otherUserTyping, setOtherUserTyping] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(true);
+  const PAGE_SIZE = 30;
+const [oldestMessageId, setOldestMessageId] = useState(null);
+const [hasMoreMessages, setHasMoreMessages] = useState(true);
+const [isFetchingMore, setIsFetchingMore] = useState(false);
   const typingTimeoutRef = useRef(null);
   const [mediaViewer, setMediaViewer] = useState({ visible: false, uri: null, type: null });
   const { getCachedImageUri } = useUserData();
@@ -214,100 +218,131 @@ export default function ChatScreen({ route, navigation }) {
 
   // ─── Load message history ───────────────────────────────────────────────────
   // FIX: Added proper auth waiting + up to 4 retries with increasing backoff
-  useEffect(() => {
-    const invalidChatId = !actualChatId ||
-      actualChatId === 'default' ||
-      actualChatId.startsWith('temp_') ||
-      actualChatId.startsWith('request_');
-    if (invalidChatId) {
+ useEffect(() => {
+  const invalidChatId = !actualChatId ||
+    actualChatId === 'default' ||
+    actualChatId.startsWith('temp_') ||
+    actualChatId.startsWith('request_');
+  if (invalidChatId) {
+    setIsLoadingMessages(false);
+    return;
+  }
+
+  let cancelled = false;
+
+  const loadMessages = async (retryCount = 0) => {
+    const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+    const cached = wsChatService.getCachedMessages(actualChatId);
+    const cacheAge = wsChatService.getCacheAge(actualChatId);
+
+    // ── Cache-skip: if cache is fresh + WS is live, no need to hit Firestore ──
+    if (cached?.length > 0 && cacheAge < CACHE_TTL && wsChatService.isConnected) {
+      if (cancelled) return;
+
+      const filtered = cached.filter(msg => {
+        const deletedFor = msg.deletedFor || {};
+        return !deletedFor[currentUserUid];
+      });
+
+      setMessages(filtered);
+
+      // Set pagination state from cache
+      const oldest = filtered[filtered.length - 1];
+      setOldestMessageId(oldest?.id ?? null);
+      setHasMoreMessages(filtered.length === PAGE_SIZE);
+
       setIsLoadingMessages(false);
+      console.log(`✅ Served ${filtered.length} messages from cache — skipped Firestore read`);
       return;
     }
 
-    let cancelled = false;
+    // ── Cache is stale/empty or WS is offline — fetch from server ──
+    if (cached?.length > 0) {
+      const filteredCached = cached.filter(msg => {
+        const deletedFor = msg.deletedFor || {};
+        return !deletedFor[currentUserUid];
+      });
+      setMessages(filteredCached);
+      setIsLoadingMessages(false);
+    } else {
+      setIsLoadingMessages(true);
+    }
 
-    const loadMessages = async (retryCount = 0) => {
-      // Show cached messages immediately (instant display)
-      const cached = wsChatService.getCachedMessages(actualChatId);
-      if (cached && cached.length > 0) {
-        const filteredCached = cached.filter(msg => {
-          const deletedFor = msg.deletedFor || {};
-          return !deletedFor[currentUserUid];
-        });
-        setMessages(filteredCached);
-        setIsLoadingMessages(false);
-      } else {
-        setIsLoadingMessages(true);
-      }
+    try {
+      const authReady = await wsChatService.waitForAuth();
+      if (cancelled) return;
 
-      try {
-        // FIX: Wait for auth before attempting to fetch — critical for APK builds
-        // where Firebase auth initialises slower than in dev.
-        const authReady = await wsChatService.waitForAuth();
-        if (cancelled) return;
-
-        if (!authReady) {
-          // auth still not ready after waitForAuth timeout
-          if (retryCount < 3) {
-            const delay = (retryCount + 1) * 1500;
-            console.warn(`⚠️ Auth not ready yet (attempt ${retryCount + 1}), retrying in ${delay}ms...`);
-            await new Promise(r => setTimeout(r, delay));
-            if (cancelled) return;
-            return loadMessages(retryCount + 1);
-          }
-          throw new Error('Authentication timed out');
-        }
-
-        console.log(`📥 Loading messages (attempt ${retryCount + 1})...`);
-        const { messages: historyMessages } = await wsChatService.fetchMessageHistory(actualChatId, 50);
-        if (cancelled) return;
-
-        const filteredMessages = (historyMessages || []).filter(msg => {
-          const deletedFor = msg.deletedFor || {};
-          return !deletedFor[currentUserUid];
-        });
-        setMessages(filteredMessages);
-        console.log(`✅ Messages loaded: ${filteredMessages.length} messages`);
-
-        // Mark undelivered messages as delivered
-        if (wsChatService.isConnected) {
-          const undeliveredMessageIds = filteredMessages
-            .filter(msg => {
-              if (msg.senderId === currentUserUid) return false;
-              const deliveredTo = msg.deliveredTo || {};
-              return !deliveredTo[currentUserUid];
-            })
-            .map(msg => msg.id);
-          if (undeliveredMessageIds.length > 0) {
-            wsChatService.markMessagesAsDelivered(actualChatId, undeliveredMessageIds);
-          }
-        }
-      } catch (error) {
-        if (cancelled) return;
-
-        // FIX: Retry up to 3 more times with increasing delay
+      if (!authReady) {
         if (retryCount < 3) {
-          const delay = (retryCount + 1) * 1500; // 1.5s → 3s → 4.5s
-          console.warn(`⚠️ Load messages failed (attempt ${retryCount + 1}), retrying in ${delay}ms... Error: ${error.message}`);
+          const delay = (retryCount + 1) * 1500;
+          console.warn(`⚠️ Auth not ready yet (attempt ${retryCount + 1}), retrying in ${delay}ms...`);
           await new Promise(r => setTimeout(r, delay));
           if (cancelled) return;
           return loadMessages(retryCount + 1);
         }
-
-        console.error('Error loading messages after all retries:', error);
-        Alert.alert(
-          'Loading Error',
-          'Failed to load messages. Please try again.',
-          [{ text: 'OK' }]
-        );
-      } finally {
-        if (!cancelled) setIsLoadingMessages(false);
+        throw new Error('Authentication timed out');
       }
-    };
 
-    loadMessages(0);
-    return () => { cancelled = true; };
-  }, [actualChatId, currentUserUid]);
+      console.log(`📥 Fetching fresh messages (attempt ${retryCount + 1})...`);
+      const response = await wsChatService.fetchMessageHistory(actualChatId, PAGE_SIZE);
+      if (cancelled) return;
+
+      const historyMessages = response.messages || [];
+      const filteredMessages = historyMessages.filter(msg => {
+        const deletedFor = msg.deletedFor || {};
+        return !deletedFor[currentUserUid];
+      });
+
+      setMessages(filteredMessages);
+
+      // Set pagination state
+      const oldest = filteredMessages[filteredMessages.length - 1];
+      setOldestMessageId(oldest?.id ?? null);
+      setHasMoreMessages(
+        response.hasMore ?? filteredMessages.length === PAGE_SIZE
+      );
+
+      console.log(`✅ Messages fetched: ${filteredMessages.length}`);
+
+      // Mark undelivered messages as delivered
+      if (wsChatService.isConnected) {
+        const undeliveredMessageIds = filteredMessages
+          .filter(msg => {
+            if (msg.senderId === currentUserUid) return false;
+            const deliveredTo = msg.deliveredTo || {};
+            return !deliveredTo[currentUserUid];
+          })
+          .map(msg => msg.id);
+
+        if (undeliveredMessageIds.length > 0) {
+          wsChatService.markMessagesAsDelivered(actualChatId, undeliveredMessageIds);
+        }
+      }
+    } catch (error) {
+      if (cancelled) return;
+
+      if (retryCount < 3) {
+        const delay = (retryCount + 1) * 1500;
+        console.warn(`⚠️ Load messages failed (attempt ${retryCount + 1}), retrying in ${delay}ms... Error: ${error.message}`);
+        await new Promise(r => setTimeout(r, delay));
+        if (cancelled) return;
+        return loadMessages(retryCount + 1);
+      }
+
+      console.error('Error loading messages after all retries:', error);
+      Alert.alert(
+        'Loading Error',
+        'Failed to load messages. Please try again.',
+        [{ text: 'OK' }]
+      );
+    } finally {
+      if (!cancelled) setIsLoadingMessages(false);
+    }
+  };
+
+  loadMessages(0);
+  return () => { cancelled = true; };
+}, [actualChatId, currentUserUid]);
 
   // ─── WebSocket: Join chat + event listeners ─────────────────────────────────
   useEffect(() => {
@@ -780,6 +815,56 @@ export default function ChatScreen({ route, navigation }) {
     );
   };
 
+
+   const loadMoreMessages = useCallback(async () => {
+    if (
+      isFetchingMore ||
+      !hasMoreMessages ||
+      !oldestMessageId ||
+      !actualChatId ||
+      actualChatId.startsWith('temp_') ||
+      actualChatId.startsWith('request_')
+    ) return;
+
+    setIsFetchingMore(true);
+    try {
+      const response = await wsChatService.fetchMessageHistory(
+        actualChatId,
+        PAGE_SIZE,
+        oldestMessageId
+      );
+
+      const olderMessages = response.messages || [];
+
+      if (olderMessages.length === 0) {
+        setHasMoreMessages(false);
+        return;
+      }
+
+      const filtered = olderMessages.filter(msg => {
+        const deletedFor = msg.deletedFor || {};
+        return !deletedFor[currentUserUid];
+      });
+
+      setMessages(prev => {
+        const existingIds = new Set(prev.map(m => m.id));
+        const newOnes = filtered.filter(m => !existingIds.has(m.id));
+        return [...prev, ...newOnes];
+      });
+
+      wsChatService.appendOlderMessagesToCache(actualChatId, filtered);
+
+      const oldest = filtered[filtered.length - 1];
+      setOldestMessageId(oldest?.id ?? null);
+      setHasMoreMessages(response.hasMore ?? filtered.length === PAGE_SIZE);
+
+    } catch (error) {
+      console.error('Error loading more messages:', error);
+    } finally {
+      setIsFetchingMore(false);
+    }
+  }, [isFetchingMore, hasMoreMessages, oldestMessageId, actualChatId, currentUserUid]);
+
   // ─── Message status ─────────────────────────────────────────────────────────
   const getMessageStatus = (message) => {
     if (message.senderId !== currentUserUid || message.isRequestMessage) {
@@ -1133,19 +1218,29 @@ export default function ChatScreen({ route, navigation }) {
           </View>
         ) : (
           <FlatList
-            ref={flatListRef}
-            data={messages}
-            keyExtractor={(item) => item.id}
-            renderItem={renderItem}
-            inverted={!showAcceptReject}
-            contentContainerStyle={styles.messagesList}
-            showsVerticalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled"
-            maintainVisibleContentPosition={{
-              minIndexForVisible: 0,
-              autoscrollToTopThreshold: 10,
-            }}
-          />
+  ref={flatListRef}
+  data={messages}
+  keyExtractor={(item) => item.id}
+  renderItem={renderItem}
+  inverted={!showAcceptReject}
+  contentContainerStyle={styles.messagesList}
+  showsVerticalScrollIndicator={false}
+  keyboardShouldPersistTaps="handled"
+  maintainVisibleContentPosition={{
+    minIndexForVisible: 0,
+    autoscrollToTopThreshold: 10,
+  }}
+  onEndReached={loadMoreMessages}
+  onEndReachedThreshold={0.3}
+  ListFooterComponent={
+    isFetchingMore ? (
+      <View style={styles.paginationLoader}>
+        <ActivityIndicator size="small" color="#FF6D1F" />
+        <Text style={styles.paginationLoaderText}>Loading older messages...</Text>
+      </View>
+    ) : null
+  }
+/>
         )}
         {renderAcceptRejectButtons()}
         {renderUploadProgress()}
@@ -1559,4 +1654,16 @@ const styles = StyleSheet.create({
     marginLeft: 6,
     fontWeight: '500',
   },
+  paginationLoader: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  justifyContent: 'center',
+  paddingVertical: 14,
+  gap: 8,
+},
+paginationLoaderText: {
+  color: 'rgba(255,255,255,0.5)',
+  fontSize: 12,
+  fontWeight: '500',
+},
 });

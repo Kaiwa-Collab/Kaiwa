@@ -2,6 +2,7 @@
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const admin = require('firebase-admin');
+const { onDocumentWritten } = require('firebase-functions/v2/firestore');
 
 if (!admin.apps.length) {
   admin.initializeApp();
@@ -116,8 +117,6 @@ async function buildUserConversations(userId) {
     console.log('=== buildUserConversations START ===');
     console.log('User ID:', userId);
     
-    // Get chats where user is participant
-    console.log('Executing Firestore query...');
     const chatsSnapshot = await admin.firestore()
       .collection('chats')
       .where('participants', 'array-contains', userId)
@@ -130,39 +129,76 @@ async function buildUserConversations(userId) {
     
     if (chatsSnapshot.empty) {
       console.log('WARNING: No chats found for user');
-      console.log('=== buildUserConversations END (empty) ===');
       return {
         conversations: [],
         messageRequests: { received: [], sent: [] }
       };
     }
 
-    // Log all chat IDs
-    const chatIds = chatsSnapshot.docs.map(d => d.id);
-    console.log('Chat IDs found:', chatIds);
+    // Collect all unique other participant IDs for direct chats
+    // so we can batch fetch all profiles in ONE read instead of N reads
+    const otherParticipantIds = [];
+    for (const chatDoc of chatsSnapshot.docs) {
+      const chatData = chatDoc.data();
+      const chatType = chatData.type || 'direct';
+      if (chatType === 'direct') {
+        const participants = chatData.participants || [];
+        const otherParticipantId = participants.find(id => id !== userId);
+        // Only fetch if not already cached in the chat doc
+        if (otherParticipantId && !chatData.participantsInfo?.[otherParticipantId]?.name) {
+          otherParticipantIds.push(otherParticipantId);
+        }
+      }
+    }
 
+    // Batch fetch all missing profiles in parallel (1 read per unique user)
+    const uniqueOtherIds = [...new Set(otherParticipantIds)];
+    const profileMap = {};
+    if (uniqueOtherIds.length > 0) {
+      const profileSnaps = await Promise.all(
+        uniqueOtherIds.map(uid =>
+          admin.firestore().collection('profile').doc(uid).get()
+        )
+      );
+      profileSnaps.forEach((snap, i) => {
+        if (snap.exists) {
+          const userData = snap.data();
+          profileMap[uniqueOtherIds[i]] = {
+            id: uniqueOtherIds[i],
+            name: userData.name || userData.displayName || userData.username || 'Unknown User',
+            displayName: userData.displayName || userData.name || userData.username || 'Unknown User',
+            avatar: userData.avatar || userData.photoURL || null,
+            username: userData.username || 'unknown'
+          };
+        } else {
+          profileMap[uniqueOtherIds[i]] = {
+            id: uniqueOtherIds[i],
+            name: 'Unknown User',
+            displayName: 'Unknown User',
+            avatar: null,
+            username: 'unknown'
+          };
+        }
+      });
+    }
+
+    // Now build conversations using cached profiles — no more per-chat reads
     for (const chatDoc of chatsSnapshot.docs) {
       const chatData = chatDoc.data();
       const chatId = chatDoc.id;
       const chatType = chatData.type || 'direct';
 
-      console.log(`\n--- Processing chat: ${chatId} ---`);
-      console.log('Chat type:', chatType);
-      console.log('Participants:', chatData.participants);
-      console.log('isActive:', chatData.isActive);
-      console.log('Has lastMessage:', !!chatData.lastMessage);
-      console.log('lastMessage text:', chatData.lastMessage?.text);
-      console.log('updatedAt:', chatData.updatedAt?.toDate?.());
-
-      const effectiveLast = await getEffectiveLastMessage(admin.firestore(), chatId, chatData.lastMessage, userId);
+      const effectiveLast = await getEffectiveLastMessage(
+        admin.firestore(), chatId, chatData.lastMessage, userId
+      );
 
       if (chatType === 'group') {
-        const groupConv = {
+        conversations.push({
           id: chatId,
           conversationId: chatId,
           type: 'group',
-          name: chatData.metadata?.name || 'Group Chat',
-          displayName: chatData.metadata?.name || 'Group Chat',
+          name: chatData.metadata?.name || chatData.name || 'Group Chat',
+          displayName: chatData.metadata?.name || chatData.name || 'Group Chat',
           avatar: chatData.metadata?.avatar || null,
           groupavatar: chatData.groupavatar || null,
           username: 'group',
@@ -171,64 +207,30 @@ async function buildUserConversations(userId) {
           unreadCount: 0,
           isPinned: false,
           participants: chatData.participants || []
-        };
-        console.log('Created group conversation:', groupConv);
-        conversations.push(groupConv);
+        });
       } else {
-        // Direct chat
         const participants = chatData.participants || [];
-        console.log('All participants:', participants);
-        
         const otherParticipantId = participants.find(id => id !== userId);
-        console.log('Other participant ID:', otherParticipantId);
         
         if (!otherParticipantId) {
-          console.log('ERROR: Could not find other participant');
+          console.log(`ERROR: Could not find other participant in chat ${chatId}`);
           continue;
         }
 
-        let participantInfo = chatData.participantsInfo?.[otherParticipantId];
-        console.log('Cached participantInfo:', participantInfo);
-        
-        // If participant info not cached in chat, fetch it
-        if (!participantInfo || !participantInfo.name) {
-          console.log(`Fetching profile for ${otherParticipantId}...`);
-          const userDoc = await admin.firestore()
-            .collection('profile')
-            .doc(otherParticipantId)
-            .get();
-          
-          console.log('Profile doc exists:', userDoc.exists);
-          
-          if (userDoc.exists) {
-            const userData = userDoc.data();
-            console.log('Profile data:', {
-              name: userData.name,
-              displayName: userData.displayName,
-              username: userData.username,
-              avatar: userData.avatar
-            });
-            
-            participantInfo = {
-              id: otherParticipantId,
-              name: userData.name || userData.displayName || userData.username || 'Unknown User',
-              displayName: userData.displayName || userData.name || userData.username,
-              avatar: userData.avatar || userData.photoURL || null,
-              username: userData.username || 'unknown'
-            };
-          } else {
-            console.log('Profile not found, using defaults');
-            participantInfo = {
-              id: otherParticipantId,
-              name: 'Unknown User',
-              displayName: 'Unknown User',
-              avatar: null,
-              username: 'unknown'
-            };
-          }
-        }
+        // Use cached participantsInfo from chat doc first, then fall back to profileMap
+        const participantInfo = 
+          (chatData.participantsInfo?.[otherParticipantId]?.name 
+            ? chatData.participantsInfo[otherParticipantId] 
+            : null) || 
+          profileMap[otherParticipantId] || {
+            id: otherParticipantId,
+            name: 'Unknown User',
+            displayName: 'Unknown User',
+            avatar: null,
+            username: 'unknown'
+          };
 
-        const directConv = {
+        conversations.push({
           id: otherParticipantId,
           conversationId: chatId,
           type: 'direct',
@@ -237,97 +239,170 @@ async function buildUserConversations(userId) {
           lastMessageTime: effectiveLast?.createdAt || chatData.updatedAt || admin.firestore.Timestamp.now(),
           unreadCount: 0,
           isPinned: false
-        };
-        
-        console.log('Created direct conversation:', directConv);
-        conversations.push(directConv);
+        });
       }
     }
 
-    // Sort conversations
-    conversations.sort((a, b) => {
+    // Deduplicate by conversationId — prevents duplicates from appearing in drawer
+    const seen = new Set();
+    const uniqueConversations = conversations.filter(conv => {
+      if (seen.has(conv.conversationId)) {
+        console.log(`Duplicate found and removed: ${conv.conversationId}`);
+        return false;
+      }
+      seen.add(conv.conversationId);
+      return true;
+    });
+
+    // Sort by latest message
+    uniqueConversations.sort((a, b) => {
       const aTime = a.lastMessageTime?.toDate ? a.lastMessageTime.toDate() : new Date(0);
       const bTime = b.lastMessageTime?.toDate ? b.lastMessageTime.toDate() : new Date(0);
       return bTime - aTime;
     });
 
-    console.log(`\n=== FINAL RESULT ===`);
-    console.log(`Total conversations built: ${conversations.length}`);
-    console.log('Conversation IDs:', conversations.map(c => c.conversationId));
+    console.log(`Total unique conversations built: ${uniqueConversations.length}`);
 
-    // Get message requests
-    const receivedRequests = await admin.firestore()
-      .collection('messageRequests')
-      .where('recipientId', '==', userId)
-      .where('status', '==', 'pending')
-      .get();
-
-    const sentRequests = await admin.firestore()
-      .collection('messageRequests')
-      .where('senderId', '==', userId)
-      .where('status', '==', 'pending')
-      .get();
+    // Get message requests in parallel
+    const [receivedRequests, sentRequests] = await Promise.all([
+      admin.firestore()
+        .collection('messageRequests')
+        .where('recipientId', '==', userId)
+        .where('status', '==', 'pending')
+        .get(),
+      admin.firestore()
+        .collection('messageRequests')
+        .where('senderId', '==', userId)
+        .where('status', '==', 'pending')
+        .get()
+    ]);
 
     console.log(`Message requests - Received: ${receivedRequests.size}, Sent: ${sentRequests.size}`);
-    console.log('=== buildUserConversations END ===\n');
+    console.log('=== buildUserConversations END ===');
 
     return {
-      conversations,
+      conversations: uniqueConversations,
       messageRequests: {
         received: receivedRequests.docs.map(doc => ({ id: doc.id, ...doc.data() })),
         sent: sentRequests.docs.map(doc => ({ id: doc.id, ...doc.data() }))
       }
     };
+
   } catch (error) {
-    console.error('=== buildUserConversations ERROR ===');
-    console.error('Error type:', error.constructor.name);
-    console.error('Error message:', error.message);
-    console.error('Error code:', error.code);
-    console.error('Error stack:', error.stack);
-    console.error('=== buildUserConversations END (error) ===');
-    
+    console.error('=== buildUserConversations ERROR ===', error.message);
     return {
       conversations: [],
-      messageRequests: {
-        received: [],
-        sent: []
-      }
+      messageRequests: { received: [], sent: [] }
     };
   }
 }
-// ==================== UPDATE USER CONVERSATIONS ON CHAT CHANGE ====================
-// Trigger: When any chat is created/updated
-exports.updateUserConversationsOnChatChange = require('firebase-functions/v2/firestore')
-  .onDocumentWritten('chats/{chatId}', async (event) => {
-    try {
-      const chatData = event.data?.after?.data();
-      if (!chatData) return;
 
-      const participants = chatData.participants || [];
-      
-      // Update conversation cache for each participant
-      for (const userId of participants) {
-        try {
-          const result = await buildUserConversations(userId);
-          
-          await admin.firestore()
-            .collection('aggregated')
-            .doc(`conversations_${userId}`)
-            .set({
-              conversations: result.conversations,
-              messageRequests: result.messageRequests,
-              lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-            });
-          
-          console.log(`[updateUserConversations] Updated cache for user: ${userId}`);
-        } catch (error) {
-          console.error(`[updateUserConversations] Error updating user ${userId}:`, error);
-        }
-      }
-    } catch (error) {
-      console.error('[updateUserConversationsOnChatChange] Error:', error);
+// ==================== UPDATE USER CONVERSATIONS ON CHAT CHANGE ====================
+exports.updateUserConversationsOnChatChange = onDocumentWritten('chats/{chatId}', async (event) => {
+  try {
+    const chatData = event.data?.after?.data();
+    const chatId = event.params.chatId;
+
+    // Chat was deleted
+    if (!chatData) {
+      console.log(`[updateUserConversations] Chat ${chatId} was deleted`);
+      return;
     }
-  });
+
+    const participants = chatData.participants || [];
+    if (participants.length === 0) {
+      console.log(`[updateUserConversations] No participants found in chat ${chatId}`);
+      return;
+    }
+
+    console.log(`[updateUserConversations] Chat ${chatId} changed, updating ${participants.length} participants`);
+
+    for (const userId of participants) {
+      try {
+        const aggRef = admin.firestore()
+          .collection('aggregated')
+          .doc(`conversations_${userId}`);
+
+        const aggDoc = await aggRef.get();
+
+        // No cache yet — do a full build
+        if (!aggDoc.exists) {
+          console.log(`[updateUserConversations] No cache for ${userId}, doing full build`);
+          const result = await buildUserConversations(userId);
+          await aggRef.set({
+            conversations: result.conversations,
+            messageRequests: result.messageRequests,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+          });
+          continue;
+        }
+
+        const existing = aggDoc.data();
+        let conversations = existing.conversations || [];
+
+        const index = conversations.findIndex(c => c.conversationId === chatId);
+
+        if (index !== -1) {
+          // Conversation exists — patch only the fields that changed
+          console.log(`[updateUserConversations] Patching existing conversation ${chatId} for user ${userId}`);
+          
+          const lastMessageText = chatData.lastMessage?.text || conversations[index].lastMessage || '';
+          const lastMessageTime = chatData.updatedAt || conversations[index].lastMessageTime;
+
+          conversations[index] = {
+            ...conversations[index],
+            lastMessage: lastMessageText,
+            lastMessageTime: lastMessageTime,
+          };
+
+        } else {
+          // New conversation for this user — build just this one
+          console.log(`[updateUserConversations] New conversation ${chatId} for user ${userId}, fetching details`);
+          const result = await buildUserConversations(userId);
+          const newConv = result.conversations.find(c => c.conversationId === chatId);
+          if (newConv) {
+            conversations.push(newConv);
+          } else {
+            console.log(`[updateUserConversations] Could not find new conversation ${chatId} in build result`);
+            continue;
+          }
+        }
+
+        // Always deduplicate before writing
+        const seen = new Set();
+        conversations = conversations.filter(conv => {
+          if (seen.has(conv.conversationId)) return false;
+          seen.add(conv.conversationId);
+          return true;
+        });
+
+        // Re-sort by latest message time
+        conversations.sort((a, b) => {
+          const aTime = a.lastMessageTime?.toDate 
+            ? a.lastMessageTime.toDate() 
+            : new Date(a.lastMessageTime || 0);
+          const bTime = b.lastMessageTime?.toDate 
+            ? b.lastMessageTime.toDate() 
+            : new Date(b.lastMessageTime || 0);
+          return bTime - aTime;
+        });
+
+        await aggRef.update({
+          conversations,
+          lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        console.log(`[updateUserConversations] Successfully updated cache for user ${userId}`);
+
+      } catch (error) {
+        console.error(`[updateUserConversations] Error updating user ${userId}:`, error);
+      }
+    }
+
+  } catch (error) {
+    console.error('[updateUserConversationsOnChatChange] Error:', error);
+  }
+});
 
 // ==================== SEARCH USERS (SERVER-SIDE) ====================
 exports.searchUsers = onCall(async (request) => {
