@@ -12,6 +12,7 @@ import wsChatService from '../../service/wsChatService';// ADD THIS IMPORT
 import HomeScreen from './HomeScreen';
 import SignUp from './SignUp';
 import Tabnavigator from './Tabnavigator';
+import { NotificationsProvider } from '../NotificationsContext';
 import ChatScreen from './ChatScreen';
 import CommentScreen from './CommentScreen';
 import Settings from './Settings';
@@ -45,13 +46,25 @@ function AppNavigator({ user, hasUsername }) {
           <>
             {hasUsername ? (
               <>
-                <Stack.Screen name="Tabnavigator" component={Tabnavigator} />
+                <Stack.Screen name="Tabnavigator">
+                  {() => (
+                    <NotificationsProvider>
+                      <Tabnavigator />
+                    </NotificationsProvider>
+                  )}
+                </Stack.Screen>
                 <Stack.Screen name="Username" component={Username} />
               </>
             ) : (
               <>
                 <Stack.Screen name="Username" component={Username} />
-                <Stack.Screen name="Tabnavigator" component={Tabnavigator} />
+                <Stack.Screen name="Tabnavigator">
+                  {() => (
+                    <NotificationsProvider>
+                      <Tabnavigator />
+                    </NotificationsProvider>
+                  )}
+                </Stack.Screen>
               </>
             )}
             <Stack.Screen name="ChatScreen" component={ChatScreen} />
@@ -71,7 +84,13 @@ function AppNavigator({ user, hasUsername }) {
         ) : (
           <>
             <Stack.Screen name="SignUp" component={SignUp} />
-            <Stack.Screen name="Tabnavigator" component={Tabnavigator} />
+            <Stack.Screen name="Tabnavigator">
+              {() => (
+                <NotificationsProvider>
+                  <Tabnavigator />
+                </NotificationsProvider>
+              )}
+            </Stack.Screen>
             <Stack.Screen name="Username" component={Username} />
           </>
         )

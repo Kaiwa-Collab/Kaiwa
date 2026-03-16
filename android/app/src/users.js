@@ -436,8 +436,14 @@ export const UserProvider = ({ children }) => {
   const fetchTrendingQuestions = async () => {
   try {
     const getTrendingQuestions = functions().httpsCallable('getTrendingQuestions');
-    const result = await getTrendingQuestions();
-    return (result?.data || []).map(q => ({
+    const result = await getTrendingQuestions({ page: 1, pageSize: 10 });
+    
+    // Handle both paginated { data: [] } and legacy plain array responses
+    const items = Array.isArray(result?.data) 
+      ? result.data 
+      : (result?.data?.data || []);
+
+    return items.map(q => ({
       ...q,
       timestamp: new Date(q.timestamp),
       createdAt: new Date(q.timestamp)

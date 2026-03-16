@@ -2,6 +2,7 @@ import { createStackNavigator } from "@react-navigation/stack";
 import React from "react";
 import Search from "./screen/Search";
 import Notifications from "./screen/Notifications";
+import ProjectDetailsModal from "../service/ProjectDetailsModal";
 
 const Stack = createStackNavigator();
 
@@ -21,6 +22,7 @@ screenOptions={{
      })} 
      />
     <Stack.Screen name="Notifications" component={Notifications} />
+    <Stack.Screen name="ProjectDetails" component={ProjectDetailsModal} />
 </Stack.Navigator>
     );
 }

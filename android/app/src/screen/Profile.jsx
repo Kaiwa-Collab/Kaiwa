@@ -77,9 +77,11 @@
     const [loadingFollowing, setLoadingFollowing] = useState(false);
     const [creatingProject, setCreatingProject] = useState(false);
     const [collaborationProjects, setCollaborationProjects] = useState([]);
+    const [canViewContent, setCanViewContent] = useState(false);
+    const [userPosts, setUserPosts] = useState([]);
+    const [loadingPosts, setLoadingPosts] = useState(false);
 
     const isOwnProfile = viewedUserId === currentUser?.uid;
-    const canViewContent = isOwnProfile || isFollowing || !userProfile?.isPrivate;
 
     // Refresh function
     const onRefresh = useCallback(async () => {
@@ -98,13 +100,14 @@
 
     useFocusEffect(
       useCallback(() => {
-        if (viewedUserId && isOwnProfile) {
+        
           loadUserData();
-        }
+        
         if (activeTab === 'Collaborations' && viewedUserId) {
           fetchCollaborationProjects();
         }
-      }, [viewedUserId, isOwnProfile, activeTab])
+      }, [viewedUserId,
+        + activeTab])
     );
 
     const fetchFollowingUsers = async () => {
@@ -524,7 +527,7 @@
       try {
         const getProfileData = functions().httpsCallable('getProfileData');
         const result = await getProfileData({ userId: viewedUserId });
-        const { userData, profileData, isFollowing: following, canViewContent: _ } = result.data || {};
+        const { userData, profileData, isFollowing: following, canViewContent: serverCanViewContent } = result.data || {};
 
         if (!userData && isOwnProfile) {
           Alert.alert('Error', 'User profile not found. Please contact support.');
@@ -555,7 +558,26 @@
           setUserProfile(defaultProfile);
           setAvatarUrl(defaultProfile.avatar);
         }
-        if (typeof following === 'boolean') setIsFollowing(following);
+        if (typeof following === 'boolean') {
+          setIsFollowing(following);
+        }
+
+        // Decide what content the viewer is allowed to see:
+        // 1) Always allow own profile
+        // 2) Always allow if current user follows this account
+        // 3) Always allow if the account is public (!isPrivate)
+        // 4) Otherwise fall back to server-side canViewContent (for blocks, etc.)
+        let nextCanView = false;
+        if (isOwnProfile) {
+          nextCanView = true;
+        } else if (following) {
+          nextCanView = true;
+        } else if (profileData && profileData.isPrivate === false) {
+          nextCanView = true;
+        } else if (typeof serverCanViewContent === 'boolean') {
+          nextCanView = serverCanViewContent;
+        }
+        setCanViewContent(nextCanView);
       } catch (error) {
         Alert.alert('Error', 'Failed to load profile data.');
         setUserData(null);
@@ -565,8 +587,34 @@
       }
     };
 
+    // Fetch posts for the viewed user (current user uses cached posts from context)
+   const fetchUserPosts = async (userId) => {
+  if (!userId) return;
+
+  // For own profile, mirror context posts
+  if (userId === currentUser?.uid) {
+    setUserPosts(posts || []);
+    return;
+  }
+
+  setLoadingPosts(true);
+  try {
+    // ✅ Use Cloud Function instead of direct Firestore query
+    const result = await functions().httpsCallable('getUserPosts')({
+      userId,
+      limit: 60,
+    });
+    setUserPosts(result.data?.posts || []);
+  } catch (error) {
+    setUserPosts([]);
+  } finally {
+    setLoadingPosts(false);
+  }
+};
+
     useEffect(() => {
       loadUserData();
+      fetchUserPosts(viewedUserId);
     }, [viewedUserId, isOwnProfile]);
 
     useEffect(() => {
@@ -580,7 +628,11 @@
         const checkFollowing = async () => {
           try {
             const result = await functions().httpsCallable('isFollowing')({ targetUserId: viewedUserId });
-            setIsFollowing(result.data?.isFollowing ?? false);
+            const nowFollowing = result.data?.isFollowing ?? false;
+            setIsFollowing(nowFollowing);
+            if (nowFollowing) {
+              setCanViewContent(true);
+            }
           } catch {
             setIsFollowing(false);
           }
@@ -836,8 +888,18 @@
       }
 
       if (activeTab === 'posts') {
-        const postsCount = userProfile?.postsCount || 0;
-        if (postsCount === 0) {
+        const visiblePosts = isOwnProfile ? (posts || []) : userPosts;
+        const postsCount = userProfile?.postsCount ?? visiblePosts.length ?? 0;
+
+        if (loadingPosts && !isOwnProfile) {
+          return (
+            <View style={styles.tabContent}>
+              <ActivityIndicator size="large" color="#007AFF" />
+            </View>
+          );
+        }
+
+        if (postsCount === 0 || visiblePosts.length === 0) {
           return (
             <View style={styles.tabContent}>
               <Icon name="camera-outline" size={64} color="#666" />
@@ -849,30 +911,30 @@
               )}
             </View>
           );
-        } else {
-          return (
-            <ScrollView contentContainerStyle={styles.gridContainer}>
-              <View style={styles.grid}>
-                {posts.map((post, idx) => (
-                  <TouchableOpacity
-                    key={post.id}
-                    style={[
-                      styles.gridItem,
-                      { marginRight: (idx + 1) % 3 === 0 ? 0 : 8 }
-                    ]}
-                    activeOpacity={0.8}
-                    onPress={() => navigation.navigate('PostDetail', { postId: post.id })}
-                  >
-                    <Image
-                      source={{ uri: getCachedImageUri(post.imageUrl) }}
-                      style={styles.gridImage}
-                    />
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </ScrollView>
-          );
         }
+
+        return (
+          <ScrollView contentContainerStyle={styles.gridContainer}>
+            <View style={styles.grid}>
+              {visiblePosts.map((post, idx) => (
+                <TouchableOpacity
+                  key={post.id}
+                  style={[
+                    styles.gridItem,
+                    { marginRight: (idx + 1) % 3 === 0 ? 0 : 8 }
+                  ]}
+                  activeOpacity={0.8}
+                  onPress={() => navigation.navigate('PostDetail', { postId: post.id })}
+                >
+                  <Image
+                    source={{ uri: getCachedImageUri(post.imageUrl) }}
+                    style={styles.gridImage}
+                  />
+                </TouchableOpacity>
+              ))}
+            </View>
+          </ScrollView>
+        );
       }
 
       if (activeTab === 'questions') {

@@ -75,7 +75,7 @@ export default function ChatInfo({ route, navigation }) {
       const participants = Object.values(chatData.participantsInfo).map(participant => ({
         id: participant.id,
         name: participant.name || participant.displayName || 'Unknown User',
-        username: participant.username || '',
+        // username: participant.username || '',
         avatar: participant.avatar || participant.photoURL || null,
       }));
 

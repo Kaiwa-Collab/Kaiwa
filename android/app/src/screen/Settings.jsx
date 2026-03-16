@@ -8,6 +8,7 @@ import { CommonActions } from '@react-navigation/native';
 import { Platform } from 'react-native';
 import githubconnection from '../githubservices/githubConnection';
 import Addbio from './Addbio';
+import functions from '@react-native-firebase/functions';
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 const Settings = () => {
   const navigation = useNavigation();
@@ -179,86 +180,60 @@ const Settings = () => {
   };
 
  
-  const handleDeleteAccount = async () => {
-    Alert.alert(
-      'Delete Account',
-      'Are you sure you want to permanently delete your account? This action cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const currentUser = auth().currentUser;
-              if (!currentUser) {
-                Alert.alert('Error', 'No user is currently signed in.');
-                return;
-              }
+ const handleDeleteAccount = async () => {
+  Alert.alert(
+    "Delete Account",
+    "Are you sure you want to permanently delete your account? This cannot be undone.",
+    [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            const currentUser = auth().currentUser;
+            if (!currentUser) {
+              Alert.alert("Error", "No user is currently signed in.");
+              return;
+            }
 
-              setLoading(true); // Show loading modal
-              const userId = currentUser.uid;
-              
+            setLoading(true);
+            const userId = currentUser.uid;
 
-              try {
-                
-                await deleteUserData(userId);
-                
-               
-                await currentUser.delete();
-                
-                setLoading(false);
-                
+            // 1) Delete Firestore data
+            await deleteUserData(userId);
 
-                Alert.alert(
-                  'Account Deleted',
-                  'Your account and all associated data have been deleted.'
-                  // Remove the onPress navigation - let auth state handle it
-                );
+            // 2) Delete Firebase Auth account
+            await currentUser.delete();
 
-              } catch (err) {
-                
-                
-                if (err.code === 'auth/requires-recent-login') {
-                  setLoading(false);
-                  
-                  
-                  try {
-                    await reauthenticateUser();
-                    setLoading(true);
-                    
-                    
-                    await deleteUserData(userId);
-                    await currentUser.delete();
-                    
-                    setLoading(false);
-                    
+            // Auth state listener handles navigation automatically
 
-                    Alert.alert(
-                      'Account Deleted', 
-                      'Your account has been deleted.'
-                      // Remove the onPress navigation - let auth state handle it
-                    );
-                  } catch (reauthErr) {
-                    setLoading(false);
-                    
-                    Alert.alert('Authentication Failed', 'Please sign in again and try.');
-                  }
-                } else {
-                  throw err;
-                }
-              }
-            } catch (error) {
-              setLoading(false);
-              
-              Alert.alert('Error', 'Failed to delete account. Try again.');
+          } catch (error) {
+            setLoading(false);
+            console.error("Delete error:", error);
+
+            if (error.code === "auth/requires-recent-login") {
+              // Re-authenticate then retry
+              Alert.alert(
+                "Security Check",
+                "Please sign out and sign back in, then try deleting again.",
+                [
+                  { text: "OK" },
+                  {
+                    text: "Sign Out Now",
+                    onPress: () => auth().signOut(),
+                  },
+                ]
+              );
+            } else {
+              Alert.alert("Error", error.message || "Failed to delete account.");
             }
           }
-        }
-      ]
-    );
-  };
-
+        },
+      },
+    ]
+  );
+};
   const handlegoback=()=>{
     navigation.goBack();
   };

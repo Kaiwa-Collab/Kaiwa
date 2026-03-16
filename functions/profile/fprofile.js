@@ -4,9 +4,11 @@
  * Use request.auth and request.data; no context.auth.
  */
 
-const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const { onCall,onRequest,HttpsError } = require('firebase-functions/v2/https');
 const { onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const admin = require('firebase-admin');
+
+
 
 if (!admin.apps.length) {
   admin.initializeApp();
@@ -268,10 +270,55 @@ exports.updateCollaboration = onCall(async (request) => {
     await projectRef.update({
       title: title.trim(),
       about: about.trim(),
+      name: title.trim(),           // ← add this
+      displayName: title.trim(),
       tech: (tech || '').trim(),
       githubRepo: (githubRepo || '').trim(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+
+   
+    // ✅ NEW: Update the group chat title so First.jsx shows the new name
+    if (project.chatId) {
+      await db.collection('chats').doc(project.chatId).update({
+        title: title.trim(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // ✅ NEW: Update aggregated doc for all collaborators so drawer reflects new name instantly
+      const collaborators = project.collaborators || [];
+      const aggUpdates = collaborators.map(async (userId) => {
+        const aggRef = db.collection('aggregated').doc(`conversations_${userId}`);
+        const aggDoc = await aggRef.get();
+        if (!aggDoc.exists) return;
+
+        const data = aggDoc.data() || {};
+        const conversations = Array.isArray(data.conversations) ? data.conversations : [];
+        let changed = false;
+
+        const updatedConversations = conversations.map((conv) => {
+  if (!conv) return conv;
+  
+  const matchesChat =
+    conv.id === project.chatId ||
+    conv.conversationId === project.chatId;
+
+  if (!matchesChat) return conv;  // ← skip non-matching convs
+
+  changed = true;
+  return { ...conv, title: title.trim(), name: title.trim(), displayName: title.trim() };
+});
+
+        if (changed) {
+          await aggRef.update({
+            conversations: updatedConversations,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+      });
+
+      await Promise.all(aggUpdates);
+    }
 
     return { success: true };
   } catch (error) {
@@ -478,6 +525,49 @@ exports.getUserQuestions = onCall(async (request) => {
   } catch (error) {
     console.error('getUserQuestions:', error);
     throw new HttpsError('internal', 'Failed to fetch questions.');
+  }
+});
+
+/**
+ * Get user's posts (paginated).
+ * Mirrors getUserQuestions but for the "posts" collection.
+ */
+exports.getUserPosts = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'User must be authenticated');
+  }
+
+  const data = request.data || {};
+  const userId = data.userId;
+  const limit = Math.min(Number(data.limit) || 20, 60);
+  const lastDocId = data.lastDocId;
+
+  if (!userId || typeof userId !== 'string') {
+    throw new HttpsError('invalid-argument', 'userId is required');
+  }
+
+  try {
+    let query = db
+      .collection('posts')
+      .where('userId', '==', userId)
+      .orderBy('createdAt', 'desc')
+      .limit(limit);
+
+    if (lastDocId) {
+      const lastDoc = await db.collection('posts').doc(lastDocId).get();
+      if (lastDoc.exists) {
+        query = query.startAfter(lastDoc);
+      }
+    }
+
+    const snapshot = await query.get();
+    const posts = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    const hasMore = snapshot.docs.length === limit;
+
+    return { posts, hasMore };
+  } catch (error) {
+    console.error('getUserPosts:', error);
+    throw new HttpsError('internal', 'Failed to fetch posts.');
   }
 });
 
@@ -864,3 +954,175 @@ exports.onProfileAvatarUpdate = onDocumentUpdated('profile/{userId}', async (eve
     batchCommits: chatCommitCount + aggCommitCount,
   });
 });
+
+// ==================== SHARED ACCOUNT DELETION HELPER ====================
+async function performAccountDeletion(uid) {
+  const firestore = admin.firestore();
+
+  // Helper to commit in chunks of 500
+  const commitInChunks = async (operations) => {
+    const chunkSize = 500;
+    for (let i = 0; i < operations.length; i += chunkSize) {
+      const batch = firestore.batch();
+      operations.slice(i, i + chunkSize).forEach(op => op(batch));
+      await batch.commit();
+    }
+  };
+
+  // 1. Fix follower/following counts on other users before deleting
+  const [followingSnap, followersSnap] = await Promise.all([
+    firestore.collection('profile').doc(uid).collection('following').get(),
+    firestore.collection('profile').doc(uid).collection('followers').get(),
+  ]);
+
+  // For each user this user followed → decrement their followersCount
+  if (!followingSnap.empty) {
+    const operations = followingSnap.docs.flatMap(doc => {
+      const followedUserId = doc.id;
+      return [
+        (batch) => batch.update(
+          firestore.collection('profile').doc(followedUserId),
+          {
+            followersCount: admin.firestore.FieldValue.increment(-1),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }
+        ),
+        (batch) => batch.delete(
+          firestore.collection('profile').doc(followedUserId).collection('followers').doc(uid)
+        ),
+      ];
+    });
+    await commitInChunks(operations);
+  }
+
+  // For each user who followed this user → decrement their followingCount
+  if (!followersSnap.empty) {
+    const operations = followersSnap.docs.flatMap(doc => {
+      const followerUserId = doc.id;
+      return [
+        (batch) => batch.update(
+          firestore.collection('profile').doc(followerUserId),
+          {
+            followingCount: admin.firestore.FieldValue.increment(-1),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }
+        ),
+        (batch) => batch.delete(
+          firestore.collection('profile').doc(followerUserId).collection('following').doc(uid)
+        ),
+      ];
+    });
+    await commitInChunks(operations);
+  }
+
+  // 2. Delete subcollections under profile
+  const subcollections = ['followers', 'following', 'followRequests'];
+  await Promise.all(subcollections.map(async (sub) => {
+    const snap = await firestore.collection('profile').doc(uid).collection(sub).get();
+    if (!snap.empty) {
+      const operations = snap.docs.map(doc => (batch) => batch.delete(doc.ref));
+      await commitInChunks(operations);
+    }
+  }));
+
+  // 3. Delete profile and users docs
+  await firestore.collection('profile').doc(uid).delete();
+  await firestore.collection('users').doc(uid).delete();
+
+  // 4. Delete from other collections
+  const fieldCollections = [
+    'questions', 'answers', 'comments', 'likes',
+    'follows', 'notifications', 'messages',
+    'posts', 'favorites', 'user_settings', 'user_analytics',
+  ];
+
+  await Promise.all(fieldCollections.flatMap(col => [
+    firestore.collection(col).where('userId', '==', uid).get()
+      .then(async snap => {
+        if (snap.empty) return;
+        const operations = snap.docs.map(d => (batch) => batch.delete(d.ref));
+        await commitInChunks(operations);
+      }),
+    firestore.collection(col).where('authorId', '==', uid).get()
+      .then(async snap => {
+        if (snap.empty) return;
+        const operations = snap.docs.map(d => (batch) => batch.delete(d.ref));
+        await commitInChunks(operations);
+      }),
+  ]));
+
+  // 5. Delete aggregated doc
+  await firestore.collection('aggregated').doc(`conversations_${uid}`).delete().catch(() => {});
+
+  // 6. Delete Auth user last
+  await admin.auth().deleteUser(uid);
+}
+
+exports.deleteAccountCallable = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'User must be authenticated');
+  }
+
+  try {
+    await performAccountDeletion(request.auth.uid);
+    return { success: true };
+  } catch (error) {
+    console.error('deleteAccountCallable error:', error);
+    throw new HttpsError('internal', `Failed to delete account: ${error.message}`);
+  }
+});
+
+
+// ==================== WEB DELETE (onRequest) ====================
+exports.deleteAccountWeb = onRequest(
+  { cors: ["https://kaiwa-collab.github.io"],
+     invoker: "public",
+     secrets: ["WEB_API_KEY"],
+   }, // ✅ Firebase handles CORS — no manual check needed
+  async (req, res) => {
+    
+
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    const { email, password } = req.body || {};
+    if (!email) {
+      return res.status(400).json({ error: "Email is required." });
+    }
+
+    try {
+      let uid;
+
+      if (password) {
+        // Email + password user — verify credentials first
+        const apiKey =  process.env.WEB_API_KEY;;
+        const signInResponse = await fetch(
+          `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password, returnSecureToken: true }) }
+        );
+        const signInData = await signInResponse.json();
+        if (!signInResponse.ok || !signInData.localId) {
+          return res.status(401).json({ error: "Invalid email or password." });
+        }
+        uid = signInData.localId;
+      } else {
+        // Google user — look up by email (no password needed)
+        const userRecord = await admin.auth().getUserByEmail(email);
+        uid = userRecord.uid;
+      }
+
+      // ✅ Calls the shared helper — same logic as in-app delete
+      await performAccountDeletion(uid);
+
+      return res.status(200).json({ success: true, message: "Account deleted successfully." });
+
+    } catch (error) {
+      console.error("[deleteAccountWeb]", error);
+      if (error.code === "auth/user-not-found") {
+        return res.status(404).json({ error: "User not found." });
+      }
+      return res.status(500).json({ error: "Failed to delete account. Please try again." });
+    }
+  }
+);

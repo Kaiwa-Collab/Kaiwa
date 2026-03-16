@@ -529,34 +529,37 @@ class WebSocketChatService {
 
     const tempId = `temp_${Date.now()}_${Math.random()}`;
 
-    return new Promise((resolve, reject) => {
-      this.socket.emit('send_message', { chatId, text, mediaUrl, mediaType, tempId });
+   return new Promise((resolve, reject) => {
+  const confirmListener = (data) => {
+    if (data.tempId === tempId) {
+      cleanup();
+      resolve({ tempId, message: data.message });
+    }
+  };
 
-      const confirmListener = (data) => {
-        if (data.tempId === tempId) {
-          this.removeListener('message_confirmed', confirmListener);
-          this.removeListener('message_error', errorListener);
-          resolve({ tempId, message: data.message });
-        }
-      };
+  const errorListener = (data) => {
+    if (data.tempId === tempId) {
+      cleanup();
+      reject(new Error(data.error));
+    }
+  };
 
-      const errorListener = (data) => {
-        if (data.tempId === tempId) {
-          this.removeListener('message_confirmed', confirmListener);
-          this.removeListener('message_error', errorListener);
-          reject(new Error(data.error));
-        }
-      };
+  const timeout = setTimeout(() => {
+    cleanup();
+    reject(new Error('Message send timeout - please check your connection'));
+  }, 30000);
 
-      this.addListener('message_confirmed', confirmListener);
-      this.addListener('message_error', errorListener);
+  const cleanup = () => {
+    clearTimeout(timeout);
+    this.removeListener('message_confirmed', confirmListener);
+    this.removeListener('message_error', errorListener);
+  };
 
-      setTimeout(() => {
-        this.removeListener('message_confirmed', confirmListener);
-        this.removeListener('message_error', errorListener);
-        reject(new Error('Message send timeout'));
-      }, 15000);
-    });
+  this.addListener('message_confirmed', confirmListener);
+  this.addListener('message_error', errorListener);
+
+  this.socket.emit('send_message', { chatId, text, mediaUrl, mediaType, tempId });
+});
   }
 
   // ============================================================================
@@ -575,13 +578,15 @@ class WebSocketChatService {
 }
 
   addMessageToCache(chatId, message) {
+    
     if (!chatId || !message?.id) return;
+      const MAX_MESSAGES = 100;
     const cached = this.messageCache.get(chatId) || [];
     const exists = cached.some(m => m.id === message.id);
     const updated = exists
       ? cached.map(m => m.id === message.id ? message : m)
       : [message, ...cached];
-    this.messageCache.set(chatId, updated);
+    this.messageCache.set(chatId, updated.slice(0,MAX_MESSAGES));
   }
 
   updateMessageInCache(chatId, message) {

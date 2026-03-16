@@ -21,6 +21,7 @@ android/local.properties
 android/.cxx/
 android/app/google-services.json
 android/app/src/config/
+android/app/*.keystore
 
 # iOS
 ios/Pods/
@@ -31,6 +32,14 @@ ios/build/
 swark-output/
 npx/
 
+# React Native
+.expo/
+.expo-shared/
+
+# Firebase
+.firebase/
+firebase-debug.log
+
 # Editor
 .vscode/
 .DS_Store
@@ -40,11 +49,11 @@ Thumbs.db
 *.pem
 *.key
 
-# Analysis / docs (optional)
+# Analysis / docs
 PRESENCE_FIX_SUMMARY.md
 WRITE_OPTIMIZATION_ANALYSIS.md
 FUNCTION_READ_COUNT_ANALYSIS.md
 
-# Separate repos / local folders
+# Separate repos
 chat-server/
 firebase/

@@ -494,6 +494,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 15,
     paddingRight: 45,
     fontSize: 16,
+    color: '#000',
   },
   checkingIndicator: {
     position: 'absolute',

@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^1.24.0",
+    "@react-native-camera-roll/camera-roll": "^7.10.2",
     "@react-native-community/hooks": "^100.1.0",
     "@react-native-firebase/app": "^22.4.0",
     "@react-native-firebase/auth": "^22.4.0",
@@ -31,6 +32,7 @@
     "joi": "^18.0.2",
     "lru-cache": "^11.2.6",
     "morgan": "^1.10.1",
+    "node-fetch": "^3.3.2",
     "npm": "^11.4.2",
     "rate-limiter-flexible": "^9.1.1",
     "react": "19.1.0",

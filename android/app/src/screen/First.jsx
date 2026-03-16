@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useMemo } from 'react';
+import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { createDrawerNavigator } from '@react-navigation/drawer';
 import {
   View,
@@ -24,6 +24,7 @@ import chatService from './chatService';
 import auth from '@react-native-firebase/auth';
 import presenceService from './presenceService';
 import functions from '@react-native-firebase/functions';
+import wsChatService from '../../service/wsChatService';
 
 
 const Drawer = createDrawerNavigator();
@@ -49,7 +50,9 @@ const arraysEqual = (a, b) => {
            item.unreadCount === bItem.unreadCount &&
            item.isPinned === bItem.isPinned &&
            item.groupavatar === bItem.groupavatar &&
-            item.avatar === bItem.avatar;
+            item.avatar === bItem.avatar &&
+            item.title === bItem.title &&   // ✅ add this
+           item.name === bItem.name; 
   });
 };
 
@@ -72,6 +75,7 @@ function CustomDrawerContent({ navigation }) {
   const [receivedRequests, setReceivedRequests] = useState([]);
   const [drawerWasClosed, setDrawerWasClosed] = useState(false);
   const [userOnlineStatus, setUserOnlineStatus] = useState({}); // Track online status for each user
+  const [longPressedChatId, setLongPressedChatId] = useState(null); // Highlight row on long-press (WhatsApp/Instagram style)
   const isFocused = useIsFocused();
   
   // Refs to store previous values for change detection
@@ -98,7 +102,7 @@ function CustomDrawerContent({ navigation }) {
   } = useUserData();
 
   // Enhanced error handling for conversations loading
- const loadActiveConversations = async () => {
+ const loadActiveConversations = useCallback (async () => {
   try {
     const currentUserId = currentUser?.uid || auth().currentUser?.uid;
     if (!currentUserId) {
@@ -145,7 +149,7 @@ function CustomDrawerContent({ navigation }) {
     setLoading(false);
     setIsInitialLoad(false);
   }
-};       
+},[currentUser?.uid]);       
   // Initial load
   useEffect(() => {
     if (!currentUser?.uid) {
@@ -414,7 +418,19 @@ const handleRefresh = React.useCallback(() => {
           (conversation.type === 'direct' && currentUserId && item.id
             ? [currentUserId, item.id].sort().join('_')
             : item.id);
+       const cacheAge = wsChatService.getCacheAge(chatDocId);
+const lastMessageTime = conversation.lastMessage?.createdAt 
+  ? new Date(conversation.lastMessage.createdAt).getTime() 
+  : 0;
 
+const STALE_THRESHOLD = 2 * 60 * 1000; // 2 minutes
+const cacheIsStale = cacheAge === Infinity || cacheAge > STALE_THRESHOLD;
+const newMessageSinceCache = cacheAge !== Infinity && lastMessageTime > (Date.now() - cacheAge);
+
+if (cacheIsStale || newMessageSinceCache) {
+  wsChatService.messageCache.delete(chatDocId);
+}
+  // Otherwise keep cache — no new messages, serve instantly
         navigation.getParent().navigate('ChatScreen', {
           chatId: chatDocId,
           title: item.displayName || item.name || item.username || 'Unknown User',
@@ -429,7 +445,7 @@ const handleRefresh = React.useCallback(() => {
       if (existingChatCheck.exists) {
         // Ensure participants are present immediately
         await chatService.ensureChatParticipants(existingChatCheck.chatId, currentUserId, item.id);
-        
+          // wsChatService.messageCache.delete(existingChatCheck.chatId);
         navigation.getParent().navigate('ChatScreen', {
           chatId: existingChatCheck.chatId,
           title: item.displayName || item.name || item.username || 'Unknown User',
@@ -450,6 +466,7 @@ const handleRefresh = React.useCallback(() => {
         // Ensure participants and participantsInfo are set immediately
         await chatService.ensureChatParticipants(conversationId, currentUserId, item.id);
 
+          // wsChatService.messageCache.delete(existingChatCheck.chatId);
         navigation.getParent().navigate('ChatScreen', {
           chatId: conversationId || item.id,
           title: item.displayName || item.name || item.username || 'Unknown User',
@@ -483,6 +500,43 @@ const handleRefresh = React.useCallback(() => {
     setSearch('');
     handleSearch('');
     Keyboard.dismiss();
+  };
+
+  // Long-press: remove chat from current user's list only (other user can keep messaging)
+  const handleChatLongPress = (item) => {
+    const chatId = item.conversationId;
+    const currentUserId = currentUser?.uid || auth().currentUser?.uid;
+    if (!currentUserId || !chatId) return;
+
+    setLongPressedChatId(chatId);
+    const isGroup = item.type === 'group';
+    Alert.alert(
+      'Delete chat',
+      isGroup
+        ? 'Remove this group from your list? You can be re-added by a member.'
+        : 'Remove this chat from your list? The other person can still send messages; you just won\'t see this conversation anymore.',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => setLongPressedChatId(null)
+        },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setLongPressedChatId(null);
+              setActiveConversations(prev => prev.filter(c => c.conversationId !== chatId));
+              await chatService.deleteChatForUser(chatId, currentUserId);
+            } catch (e) {
+              loadActiveConversations();
+              Alert.alert('Error', 'Failed to remove chat. Please try again.');
+            }
+          }
+        }
+      ]
+    );
   };
 
 
@@ -552,7 +606,7 @@ const handleRefresh = React.useCallback(() => {
   };
 
   const getDisplayName = (user) => {
-    return user.displayName || user.name || user.username || 'Unknown User';
+    return user.displayName || user.title || user.name || user.username || 'Unknown User';
   };
 
   const getInitials = (user) => {
@@ -642,15 +696,18 @@ const handleRefresh = React.useCallback(() => {
   ? (item.groupavatar || null)
   : (item.avatar || item.photoURL || null);
     
+    const isLongPressed = status === 'active' && item.conversationId === longPressedChatId;
     return (
       <TouchableOpacity
         style={[
           styles.chatItem,
           status === 'new' && search.trim().length >= 3 && styles.newChatItem,
           status === 'pending' && styles.pendingChatItem,
-          status === 'request' && styles.requestChatItem
+          status === 'request' && styles.requestChatItem,
+          isLongPressed && styles.chatItemLongPressHighlight
         ]}
         onPress={() => handleChatPress(item)}
+        onLongPress={() => status === 'active' && handleChatLongPress(item)}
         activeOpacity={0.7}
       >
        <View style={styles.avatarPlaceholder}>
@@ -834,7 +891,7 @@ const handleRefresh = React.useCallback(() => {
             autoCorrect={false}
             returnKeyType="search"
             onSubmitEditing={() => Keyboard.dismiss()}
-            editable={!contextLoading && !loading}
+            editable={!contextLoading}
           />
           {search.length > 0 && (
             <TouchableOpacity
@@ -1062,6 +1119,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 122, 255, 0.05)',
     borderLeftWidth: 3,
     borderLeftColor: '#007AFF',
+  },
+  chatItemLongPressHighlight: {
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
   },
   avatarPlaceholder: {
     width: 50,

@@ -4,8 +4,12 @@ import Icon from 'react-native-vector-icons/FontAwesome';
 import { useNavigation } from '@react-navigation/native';
 import { useUserData } from './users';
 import Firestore from '@react-native-firebase/firestore';
+import { Dimensions } from 'react-native';
 
-const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLikedBy = [], createdAt, postsId }) => {
+
+const SCREEN_WIDTH = Dimensions.get('window').width;
+
+const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLikedBy = [], createdAt, postsId,userId }) => {
   const [starred, setStarred] = useState(false);
   const [starCount, setStarCount] = useState(initialLikeCount || 0);
   const [updating, setUpdating] = useState(false);
@@ -14,6 +18,7 @@ const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLiked
   const actualPostId = postsId;
   const navigation = useNavigation();
   const { currentUser } = useUserData();
+  const [imageSize, setImageSize] = useState({ width: 1, height: 1 });
 
   // Keep liveAvatar in sync when parent passes a fresh avatar
   useEffect(() => {
@@ -22,19 +27,19 @@ const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLiked
 
   // ONE-TIME read on mount — no persistent listener
   // Eliminates 400 snapshot listeners for 20 users x 20 posts
-  useEffect(() => {
-    if (!actualPostId || !currentUser) return;
+  // useEffect(() => {
+  //   if (!actualPostId || !currentUser) return;
 
-    Firestore().collection('posts').doc(actualPostId).get().then(doc => {
-      if (doc.exists) {
-        const postData = doc.data();
-        setStarCount(postData.likes || 0);
-        setStarred((postData.likedBy || []).includes(currentUser.uid));
-      }
-    }).catch(error => {
-      console.error('Error fetching post data:', error);
-    });
-  }, [actualPostId, currentUser]);
+  //   Firestore().collection('posts').doc(actualPostId).get().then(doc => {
+  //     if (doc.exists) {
+  //       const postData = doc.data();
+  //       setStarCount(postData.likes || 0);
+  //       setStarred((postData.likedBy || []).includes(currentUser.uid));
+  //     }
+  //   }).catch(error => {
+  //     console.error('Error fetching post data:', error);
+  //   });
+  // }, [actualPostId, currentUser]);
 
   // Initial starred state from prop (shown immediately before get() resolves)
   useEffect(() => {
@@ -128,19 +133,37 @@ const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLiked
     });
   };
 
+  const navigateToProfile = () => {
+  if (userId) {
+    navigation.navigate('Profile', { screen: 'Profile', params: { userId } });
+  }
+};
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
+        <TouchableOpacity 
+    onPress={navigateToProfile} 
+    disabled={!userId} 
+    activeOpacity={userId ? 0.7 : 1}
+  >
         {liveAvatar ? (
           <Image source={{ uri: liveAvatar }} style={styles.avatar} />
         ) : (
           <View style={styles.avatarPlaceholder} />
         )}
+        </TouchableOpacity>
         <Text style={styles.username}>{name}</Text>
       </View>
 
       {image ? (
-        <Image source={{ uri: image }} style={styles.postImage} resizeMode="cover" />
+       <View style={styles.imageFrame}>
+  <Image
+    source={{ uri: image }}
+    style={styles.postImage}
+    resizeMode="cover"
+  />
+</View>
       ) : (
         <View style={styles.postImagePlaceholder}>
           <Text style={styles.placeholderText}>No image</Text>
@@ -212,13 +235,17 @@ const styles = StyleSheet.create({
     marginLeft: 10,
     fontSize: 17,
   },
-  postImage: {
-    width: '100%',
-    height: 300,
-    backgroundColor: '#222',
-    borderBottomWidth: 1,
-    borderBottomColor: 'white',
-  },
+ imageFrame: {
+  width: '100%',
+  aspectRatio: 4 / 5,   // fixed Instagram frame
+  backgroundColor: '#000',
+  overflow: 'hidden',
+},
+
+postImage: {
+  width: '100%',
+  height: '100%',
+},
   postImagePlaceholder: {
     width: '100%',
     height: 300,

@@ -47,6 +47,7 @@ exports.getUserProfile=usernameFunctions.getUserProfile;
 // ==================== CONVERSATIONS FUNCTIONS ====================
 exports.getUserConversations = conversationsFunctions.getUserConversations;
 exports.updateUserConversationsOnChatChange = conversationsFunctions.updateUserConversationsOnChatChange;
+exports.removeConversationOnUserChatDelete = conversationsFunctions.removeConversationOnUserChatDelete;
 exports.searchUsers = conversationsFunctions.searchUsers;
 exports.fixChatParticipants = conversationsFunctions.fixChatParticipants;
 
@@ -82,7 +83,10 @@ exports.createPost = profileFunctions.createPost;
 exports.updateAvatar = profileFunctions.updateAvatar;
 exports.isFollowing = profileFunctions.isFollowing;
 exports.onProfileAvatarUpdate = profileFunctions.onProfileAvatarUpdate;
-
+exports.deleteAccount    = profileFunctions.deleteAccount;
+exports.deleteAccountCallable = profileFunctions.deleteAccountCallable;
+exports.deleteAccountWeb = profileFunctions.deleteAccountWeb;
+exports.getUserPosts=profileFunctions.getUserPosts
 // ==================== SEARCH PAGE FUNCTIONS ====================
 exports.searchPageUsers = searchPageFunctions.searchPageUsers;
 exports.searchProjects = searchPageFunctions.searchProjects;
@@ -93,3 +97,6 @@ exports.saveSearchSuggestion = searchPageFunctions.saveSearchSuggestion;
 exports.saveProjectSuggestion = searchPageFunctions.saveProjectSuggestion;
 exports.removeSearchSuggestion = searchPageFunctions.removeSearchSuggestion;
 exports.removeProjectSuggestion = searchPageFunctions.removeProjectSuggestion;
+exports.sendProjectJoinRequest = searchPageFunctions.sendProjectJoinRequest;
+exports.acceptProjectJoinRequest = searchPageFunctions.acceptProjectJoinRequest;
+exports.rejectProjectJoinRequest = searchPageFunctions.rejectProjectJoinRequest;

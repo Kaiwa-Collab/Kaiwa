@@ -22,7 +22,7 @@ import {
   ScrollView,   
 } from 'react-native';
 import { Image } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import firestore from '@react-native-firebase/firestore';
 import auth from '@react-native-firebase/auth';
 import EmptydP from './Emptydp';
@@ -35,6 +35,10 @@ import storage from '@react-native-firebase/storage';
 import Video from 'react-native-video';
 import chatService from './chatService';
 import {useUserData} from '../users';
+import RNFS from 'react-native-fs';
+import { CameraRoll } from '@react-native-camera-roll/camera-roll';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -58,7 +62,7 @@ export default function ChatScreen({ route, navigation }) {
   const [headerTitle, setHeaderTitle] = useState(title || 'Chat');
   const [headerAvatar, setHeaderAvatar] = useState(avatar || '');
   const flatListRef = useRef(null);
-  const currentUserUid = auth().currentUser?.uid;
+  const currentUserUid = useRef(auth().currentUser?.uid).current;
   const [chatData, setChatData] = useState(null);
   const [isCreator, setIsCreator] = useState(false);
   const [onlineStatus, setOnlineStatus] = useState('Offline');
@@ -78,6 +82,76 @@ const [isFetchingMore, setIsFetchingMore] = useState(false);
   const typingTimeoutRef = useRef(null);
   const [mediaViewer, setMediaViewer] = useState({ visible: false, uri: null, type: null });
   const { getCachedImageUri } = useUserData();
+  const [downloadStates, setDownloadStates] = useState({}); // { [messageId]: 'idle'|'downloading'|'done' }
+const localMediaPaths = useRef({});  
+const [localMessageStatus, setLocalMessageStatus] = useState({}); // { [messageId]: 'sent'|'delivered'|'seen' }
+  const isScreenFocused = useIsFocused();
+  const oldestMessageIdRef = useRef(null);
+
+  // Keep ref in sync whenever state updates:
+useEffect(() => {
+  oldestMessageIdRef.current = oldestMessageId;
+}, [oldestMessageId]);
+
+useEffect(() => {
+  // Load all previously downloaded paths from AsyncStorage on mount
+  const loadPersistedPaths = async () => {
+    try {
+      const stored = await AsyncStorage.getItem('downloadedMediaPaths');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        localMediaPaths.current = parsed;
+
+        // Also restore downloadStates so the UI shows 'done' immediately
+        // Only mark 'done' for messages that actually exist on disk still
+        const verified = {};
+        await Promise.all(
+          Object.entries(parsed).map(async ([msgId, filePath]) => {
+            try {
+              const exists = await RNFS.exists(filePath);
+              if (exists) {
+                verified[msgId] = filePath;
+              }
+            } catch (_) {}
+          })
+        );
+
+        // Remove stale entries (file was deleted from device)
+        localMediaPaths.current = verified;
+        if (Object.keys(verified).length !== Object.keys(parsed).length) {
+          await AsyncStorage.setItem('downloadedMediaPaths', JSON.stringify(verified));
+        }
+
+        // Set all verified entries as 'done' in UI state
+        const doneStates = Object.fromEntries(
+          Object.keys(verified).map(id => [id, 'done'])
+        );
+        setDownloadStates(prev => ({ ...prev, ...doneStates }));
+      }
+    } catch (error) {
+      console.error('Failed to load persisted media paths:', error);
+    }
+  };
+
+  loadPersistedPaths();
+}, []); // runs once on mount
+
+  const updateLocalStatus = useCallback((messageIds, status) => {
+    if (!messageIds || messageIds.length === 0) return;
+    if (status !== 'delivered' && status !== 'seen') return;
+
+    setLocalMessageStatus(prev => {
+      const next = { ...prev };
+      messageIds.forEach(id => {
+        // Never downgrade from 'seen'
+        if (prev[id] === 'seen') {
+          return;
+        }
+        next[id] = status;
+      });
+      return next;
+    });
+  }, []);
 
   // ─── WebSocket connection status (connection is initiated by AuthWrapper on app open) ───
   useEffect(() => {
@@ -231,117 +305,123 @@ const [isFetchingMore, setIsFetchingMore] = useState(false);
   let cancelled = false;
 
   const loadMessages = async (retryCount = 0) => {
-    const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-    const cached = wsChatService.getCachedMessages(actualChatId);
-    const cacheAge = wsChatService.getCacheAge(actualChatId);
+  const CACHE_TTL = 5 * 60 * 1000;
+  const cached = wsChatService.getCachedMessages(actualChatId);
+  const cacheAge = wsChatService.getCacheAge(actualChatId);
 
-    // ── Cache-skip: if cache is fresh + WS is live, no need to hit Firestore ──
-    if (cached?.length > 0 && cacheAge < CACHE_TTL && wsChatService.isConnected) {
-      if (cancelled) return;
+  // ── Cache-skip: if cache is fresh + WS is live ──
+  if (cached?.length > 0 && cacheAge < CACHE_TTL && wsChatService.isConnected) {
+    if (cancelled) return;
 
-      const filtered = cached.filter(msg => {
-        const deletedFor = msg.deletedFor || {};
-        return !deletedFor[currentUserUid];
+    const filtered = cached.filter(msg => {
+      const deletedFor = msg.deletedFor || {};
+      return !deletedFor[currentUserUid];
+    });
+
+    // ✅ Fix 3: merge instead of replace to preserve readBy/deliveredTo
+    setMessages(prev => {
+      if (prev.length === 0) return filtered;
+      const prevMap = new Map(prev.map(m => [m.id, m]));
+      return filtered.map(msg => {
+        const existing = prevMap.get(msg.id);
+        if (!existing) return msg;
+        return {
+          ...msg,
+          readBy: { ...msg.readBy, ...existing.readBy },
+          deliveredTo: { ...msg.deliveredTo, ...existing.deliveredTo },
+        };
       });
+    });
 
-      setMessages(filtered);
+    const oldest = filtered[filtered.length - 1];
+    setOldestMessageId(oldest?.id ?? null);
+    setHasMoreMessages(filtered.length === PAGE_SIZE);
+    setIsLoadingMessages(false);
+    console.log(`✅ Served ${filtered.length} messages from cache`);
+    return;
+  }
 
-      // Set pagination state from cache
-      const oldest = filtered[filtered.length - 1];
-      setOldestMessageId(oldest?.id ?? null);
-      setHasMoreMessages(filtered.length === PAGE_SIZE);
+  // ── Cache stale/empty — show stale while fetching fresh ──
+  if (cached?.length > 0) {
+    const filteredCached = cached.filter(msg => {
+      const deletedFor = msg.deletedFor || {};
+      return !deletedFor[currentUserUid];
+    });
+    setMessages(filteredCached);
+    setIsLoadingMessages(false);
+  } else {
+    setIsLoadingMessages(true);
+  }
 
-      setIsLoadingMessages(false);
-      console.log(`✅ Served ${filtered.length} messages from cache — skipped Firestore read`);
-      return;
+  try {
+    // ✅ Fix 2: removed waitForAuth() — fetchMessageHistory handles auth internally
+    console.log(`📥 Fetching fresh messages (attempt ${retryCount + 1})...`);
+    const response = await wsChatService.fetchMessageHistory(actualChatId, PAGE_SIZE);
+    if (cancelled) return;
+
+    const historyMessages = response.messages || [];
+    const filteredMessages = historyMessages.filter(msg => {
+      const deletedFor = msg.deletedFor || {};
+      return !deletedFor[currentUserUid];
+    });
+
+    // ✅ Fix 3: merge instead of replace
+    setMessages(prev => {
+      if (prev.length === 0) return filteredMessages;
+      const prevMap = new Map(prev.map(m => [m.id, m]));
+      return filteredMessages.map(msg => {
+        const existing = prevMap.get(msg.id);
+        if (!existing) return msg;
+        return {
+          ...msg,
+          readBy: { ...msg.readBy, ...existing.readBy },
+          deliveredTo: { ...msg.deliveredTo, ...existing.deliveredTo },
+        };
+      });
+    });
+
+    const oldest = filteredMessages[filteredMessages.length - 1];
+    setOldestMessageId(oldest?.id ?? null);
+    setHasMoreMessages(response.hasMore ?? filteredMessages.length === PAGE_SIZE);
+
+    console.log(`✅ Messages fetched: ${filteredMessages.length}`);
+
+    // Mark undelivered as delivered
+    if (wsChatService.isConnected) {
+      const undeliveredIds = filteredMessages
+        .filter(msg => {
+          if (msg.senderId === currentUserUid) return false;
+          return !msg.deliveredTo?.[currentUserUid];
+        })
+        .map(msg => msg.id);
+
+      if (undeliveredIds.length > 0) {
+        wsChatService.markMessagesAsDelivered(actualChatId, undeliveredIds);
+      }
+    }
+  } catch (error) {
+    if (cancelled) return;
+
+    if (retryCount < 3) {
+      const delay = (retryCount + 1) * 1500;
+      console.warn(`⚠️ Retry ${retryCount + 1} in ${delay}ms: ${error.message}`);
+      await new Promise(r => setTimeout(r, delay));
+      if (cancelled) return;
+      return loadMessages(retryCount + 1);
     }
 
-    // ── Cache is stale/empty or WS is offline — fetch from server ──
-    if (cached?.length > 0) {
-      const filteredCached = cached.filter(msg => {
-        const deletedFor = msg.deletedFor || {};
-        return !deletedFor[currentUserUid];
-      });
-      setMessages(filteredCached);
-      setIsLoadingMessages(false);
-    } else {
-      setIsLoadingMessages(true);
-    }
+    console.error('Error loading messages after all retries:', error);
+    Alert.alert('Loading Error', 'Failed to load messages. Please try again.', [{ text: 'OK' }]);
+  } finally {
+    if (!cancelled) setIsLoadingMessages(false);
+  }
+};
+if (wsChatService.isConnected) {
+  try { wsChatService.joinChat(actualChatId); } catch (_) {}
+}
 
-    try {
-      const authReady = await wsChatService.waitForAuth();
-      if (cancelled) return;
-
-      if (!authReady) {
-        if (retryCount < 3) {
-          const delay = (retryCount + 1) * 1500;
-          console.warn(`⚠️ Auth not ready yet (attempt ${retryCount + 1}), retrying in ${delay}ms...`);
-          await new Promise(r => setTimeout(r, delay));
-          if (cancelled) return;
-          return loadMessages(retryCount + 1);
-        }
-        throw new Error('Authentication timed out');
-      }
-
-      console.log(`📥 Fetching fresh messages (attempt ${retryCount + 1})...`);
-      const response = await wsChatService.fetchMessageHistory(actualChatId, PAGE_SIZE);
-      if (cancelled) return;
-
-      const historyMessages = response.messages || [];
-      const filteredMessages = historyMessages.filter(msg => {
-        const deletedFor = msg.deletedFor || {};
-        return !deletedFor[currentUserUid];
-      });
-
-      setMessages(filteredMessages);
-
-      // Set pagination state
-      const oldest = filteredMessages[filteredMessages.length - 1];
-      setOldestMessageId(oldest?.id ?? null);
-      setHasMoreMessages(
-        response.hasMore ?? filteredMessages.length === PAGE_SIZE
-      );
-
-      console.log(`✅ Messages fetched: ${filteredMessages.length}`);
-
-      // Mark undelivered messages as delivered
-      if (wsChatService.isConnected) {
-        const undeliveredMessageIds = filteredMessages
-          .filter(msg => {
-            if (msg.senderId === currentUserUid) return false;
-            const deliveredTo = msg.deliveredTo || {};
-            return !deliveredTo[currentUserUid];
-          })
-          .map(msg => msg.id);
-
-        if (undeliveredMessageIds.length > 0) {
-          wsChatService.markMessagesAsDelivered(actualChatId, undeliveredMessageIds);
-        }
-      }
-    } catch (error) {
-      if (cancelled) return;
-
-      if (retryCount < 3) {
-        const delay = (retryCount + 1) * 1500;
-        console.warn(`⚠️ Load messages failed (attempt ${retryCount + 1}), retrying in ${delay}ms... Error: ${error.message}`);
-        await new Promise(r => setTimeout(r, delay));
-        if (cancelled) return;
-        return loadMessages(retryCount + 1);
-      }
-
-      console.error('Error loading messages after all retries:', error);
-      Alert.alert(
-        'Loading Error',
-        'Failed to load messages. Please try again.',
-        [{ text: 'OK' }]
-      );
-    } finally {
-      if (!cancelled) setIsLoadingMessages(false);
-    }
-  };
-
-  loadMessages(0);
-  return () => { cancelled = true; };
+loadMessages(0);
+return () => { cancelled = true; };
 }, [actualChatId, currentUserUid]);
 
   // ─── WebSocket: Join chat + event listeners ─────────────────────────────────
@@ -380,19 +460,24 @@ const [isFetchingMore, setIsFetchingMore] = useState(false);
       wsChatService.markMessagesAsDelivered(actualChatId, [message.id]);
     };
 
-    const handleMessageConfirmed = (data) => {
-      setMessages(prev => {
-        const withoutTemps = prev.filter(msg => !msg.id.startsWith('temp_'));
-        const existingIndex = withoutTemps.findIndex(m => m.id === data.message.id);
-        if (existingIndex !== -1) {
-          return withoutTemps.map((m, i) =>
-            i === existingIndex ? data.message : m
-          );
-        }
-        return [data.message, ...withoutTemps];
-      });
-      wsChatService.addMessageToCache(actualChatId, data.message);
+   const handleMessageConfirmed = (data) => {
+  setMessages(prev => {
+    const withoutTemps = prev.filter(msg => !msg.id.startsWith('temp_'));
+    const existingMsg = withoutTemps.find(m => m.id === data.message.id);
+    const mergedMessage = {
+      ...data.message,
+      // Preserve read/delivery status already tracked locally
+      readBy: { ...data.message.readBy, ...(existingMsg?.readBy || {}) },
+      deliveredTo: { ...data.message.deliveredTo, ...(existingMsg?.deliveredTo || {}) },
     };
+    const existingIndex = withoutTemps.findIndex(m => m.id === data.message.id);
+    if (existingIndex !== -1) {
+      return withoutTemps.map((m, i) => i === existingIndex ? mergedMessage : m);
+    }
+    return [mergedMessage, ...withoutTemps];
+  });
+  wsChatService.addMessageToCache(actualChatId, data.message);
+};
 
     const handleMessageError = (data) => {
       console.error('Message error:', data);
@@ -401,37 +486,57 @@ const [isFetchingMore, setIsFetchingMore] = useState(false);
     };
 
     const handleMessagesDelivered = (data) => {
-      setMessages(prev =>
-        prev.map(msg => {
+      if (!data?.messageIds || data.messageIds.length === 0) return;
+
+      setMessages(prev => {
+        const updated = prev.map(msg => {
           if (data.messageIds.includes(msg.id)) {
-            return {
+            const nextMsg = {
               ...msg,
               deliveredTo: {
                 ...msg.deliveredTo,
                 [data.userId]: new Date().toISOString()
               }
             };
+            // Keep cache in sync so future history loads don't regress status
+            wsChatService.updateMessageInCache(actualChatId, nextMsg);
+            return nextMsg;
           }
           return msg;
-        })
-      );
+        });
+
+        return updated;
+      });
+
+      // Locally mark these messages as at least 'delivered' (won't downgrade from seen)
+      updateLocalStatus(data.messageIds, 'delivered');
     };
 
     const handleMessagesRead = (data) => {
-      setMessages(prev =>
-        prev.map(msg => {
+      if (!data?.messageIds || data.messageIds.length === 0) return;
+
+      setMessages(prev => {
+        const updated = prev.map(msg => {
           if (data.messageIds.includes(msg.id)) {
-            return {
+            const nextMsg = {
               ...msg,
               readBy: {
                 ...msg.readBy,
                 [data.userId]: new Date().toISOString()
               }
             };
+            // Keep cache in sync so future history loads don't regress status
+            wsChatService.updateMessageInCache(actualChatId, nextMsg);
+            return nextMsg;
           }
           return msg;
-        })
-      );
+        });
+
+        return updated;
+      });
+
+      // Locally mark these messages as 'seen' so ticks don't flicker back
+      updateLocalStatus(data.messageIds, 'seen');
     };
 
     const handleUserTyping = (data) => {
@@ -441,13 +546,21 @@ const [isFetchingMore, setIsFetchingMore] = useState(false);
     };
 
     const handleMessageUpdated = (data) => {
-      if (data.chatId === actualChatId && data.message) {
-        setMessages(prev =>
-          prev.map(msg => msg.id === data.message.id ? data.message : msg)
-        );
-        wsChatService.updateMessageInCache(actualChatId, data.message);
-      }
-    };
+  if (data.chatId === actualChatId && data.message) {
+    setMessages(prev =>
+      prev.map(msg => {
+        if (msg.id !== data.message.id) return msg;
+        return {
+          ...data.message,
+          // Preserve read/delivery status — server update may not have latest
+          readBy: { ...data.message.readBy, ...msg.readBy },
+          deliveredTo: { ...data.message.deliveredTo, ...msg.deliveredTo },
+        };
+      })
+    );
+    wsChatService.updateMessageInCache(actualChatId, data.message);
+  }
+};
 
     wsChatService.addListener('new_message', handleNewMessage);
     wsChatService.addListener('message_confirmed', handleMessageConfirmed);
@@ -467,26 +580,131 @@ const [isFetchingMore, setIsFetchingMore] = useState(false);
       wsChatService.removeListener('message_updated', handleMessageUpdated);
       wsChatService.leaveChat(actualChatId);
     };
-  }, [actualChatId, currentUserUid, isConnected]);
+  }, [actualChatId, currentUserUid, isConnected, updateLocalStatus]);
 
-  // ─── Mark messages as read on focus ─────────────────────────────────────────
+  // ─── Mark messages as read when screen focused ──────────────────────────────
+  const markUnreadAsRead = useCallback(() => {
+    if (
+      !actualChatId ||
+      actualChatId === 'default' ||
+      actualChatId.startsWith('temp_') ||
+      actualChatId.startsWith('request_')
+    ) {
+      return;
+    }
+
+    const unreadMessageIds = messages
+      .filter(msg => {
+        if (msg.senderId === currentUserUid) return false;
+        const readBy = msg.readBy || {};
+        return !readBy[currentUserUid];
+      })
+      .map(msg => msg.id);
+
+    if (unreadMessageIds.length === 0) {
+      return;
+    }
+
+    // Fast path: send over WebSocket if connected
+    if (wsChatService.isConnected) {
+      wsChatService.markMessagesAsRead(actualChatId, unreadMessageIds);
+    }
+
+    // Reliable path: also tell backend via Cloud Function (fire-and-forget)
+    // so sender sees "seen" even if socket was briefly disconnected.
+    chatService.markMessagesAsRead(actualChatId, currentUserUid);
+  }, [actualChatId, currentUserUid, messages]);
+
   useFocusEffect(
     React.useCallback(() => {
-      if (actualChatId && !actualChatId.startsWith('temp_') && !actualChatId.startsWith('request_') && isConnected) {
-        const unreadMessageIds = messages
-          .filter(msg => {
-            if (msg.senderId === currentUserUid) return false;
-            const readBy = msg.readBy || {};
-            return !readBy[currentUserUid];
-          })
-          .map(msg => msg.id);
-
-        if (unreadMessageIds.length > 0) {
-          wsChatService.markMessagesAsRead(actualChatId, unreadMessageIds);
-        }
-      }
-    }, [actualChatId, currentUserUid, messages, isConnected])
+      markUnreadAsRead();
+    }, [markUnreadAsRead])
   );
+
+  // Also mark as read whenever new messages arrive while screen is already focused
+  useEffect(() => {
+    if (isScreenFocused) {
+      markUnreadAsRead();
+    }
+  }, [isScreenFocused, messages, markUnreadAsRead]);
+
+  // ─── Firestore fallback listener when WebSocket is not connected ─────────────
+  useEffect(() => {
+    const invalidChatId =
+      !actualChatId ||
+      actualChatId === 'default' ||
+      actualChatId.startsWith('temp_') ||
+      actualChatId.startsWith('request_');
+
+    // Only attach Firestore listener for real chats and ONLY when socket is not connected.
+    if (invalidChatId || isConnected) {
+      return;
+    }
+
+    try {
+      const messagesRef = firestore()
+        .collection('chats')
+        .doc(actualChatId)
+        .collection('messages')
+        .orderBy('createdAt', 'desc')
+        .limit(PAGE_SIZE);
+
+      const unsubscribe = messagesRef.onSnapshot(
+        (snapshot) => {
+          const liveMessages = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+          }));
+
+          const filtered = liveMessages.filter(msg => {
+            const deletedFor = msg.deletedFor || {};
+            return !deletedFor[currentUserUid];
+          });
+
+          if (filtered.length === 0) {
+            return;
+          }
+
+          // Inside the onSnapshot callback, replace the setMessages call:
+
+setMessages(prev => {
+  if (prev.length === 0) {
+    filtered.forEach(m => wsChatService.addMessageToCache(actualChatId, m));
+    return filtered;
+  }
+
+  const prevMap = new Map(prev.map(m => [m.id, m]));
+  
+  // ✅ FIX: preserve WS-updated readBy/deliveredTo when Firestore catches up
+  const merged = filtered.map(m => {
+    const existing = prevMap.get(m.id);
+    if (!existing) return m;
+    return {
+      ...m,
+      readBy: { ...m.readBy, ...existing.readBy },
+      deliveredTo: { ...m.deliveredTo, ...existing.deliveredTo },
+    };
+  });
+
+  // Also keep any messages not in Firestore snapshot (e.g. optimistic temp ones)
+  const mergedIds = new Set(merged.map(m => m.id));
+  const extras = prev.filter(m => !mergedIds.has(m.id));
+
+  const result = [...merged, ...extras.filter(m => m.id.startsWith('temp_'))];
+  result.forEach(m => wsChatService.addMessageToCache(actualChatId, m));
+  return result;
+});
+        },
+        (error) => {
+          console.error('Firestore messages listener error:', error);
+        }
+      );
+
+      return () => unsubscribe();
+    } catch (error) {
+      console.error('Failed to attach Firestore listener for chat messages:', error);
+    }
+  }, [actualChatId, currentUserUid, isConnected]);
 
   // ─── Set header ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -817,10 +1035,12 @@ const [isFetchingMore, setIsFetchingMore] = useState(false);
 
 
    const loadMoreMessages = useCallback(async () => {
+     const currentOldest = oldestMessageIdRef.current;
     if (
       isFetchingMore ||
       !hasMoreMessages ||
-      !oldestMessageId ||
+      !currentOldest||
+
       !actualChatId ||
       actualChatId.startsWith('temp_') ||
       actualChatId.startsWith('request_')
@@ -831,7 +1051,7 @@ const [isFetchingMore, setIsFetchingMore] = useState(false);
       const response = await wsChatService.fetchMessageHistory(
         actualChatId,
         PAGE_SIZE,
-        oldestMessageId
+        currentOldest
       );
 
       const olderMessages = response.messages || [];
@@ -863,59 +1083,58 @@ const [isFetchingMore, setIsFetchingMore] = useState(false);
     } finally {
       setIsFetchingMore(false);
     }
-  }, [isFetchingMore, hasMoreMessages, oldestMessageId, actualChatId, currentUserUid]);
+  }, [isFetchingMore, hasMoreMessages, actualChatId, currentUserUid]);
 
   // ─── Message status ─────────────────────────────────────────────────────────
   const getMessageStatus = (message) => {
-    if (message.senderId !== currentUserUid || message.isRequestMessage) {
-      return null;
-    }
+  if (message.senderId !== currentUserUid || message.isRequestMessage) return null;
 
-    if (message.status === 'sending') {
-      return 'sending';
-    }
+  const override = localMessageStatus[message.id];
+  if (override) return override;
 
-    const targetRecipientId = recipientId || userId;
+  if (message.status === 'sending') return 'sending';
 
-    if (!targetRecipientId && chatData?.participants) {
-      const otherParticipant = chatData.participants.find(id => id !== currentUserUid);
-      if (otherParticipant) {
-        const readBy = message.readBy || {};
-        const deliveredTo = message.deliveredTo || {};
-
-        if (readBy[otherParticipant]) return 'seen';
-        if (deliveredTo[otherParticipant]) return 'delivered';
-        if (message.id && !message.id.startsWith('temp_')) return 'sent';
-      }
-    }
-
-    if (!targetRecipientId) {
-      if (message.id && !message.id.startsWith('temp_')) return 'sent';
-      return 'sending';
-    }
-
-    const readBy = message.readBy || {};
-    const deliveredTo = message.deliveredTo || {};
-
-    if (readBy[targetRecipientId]) return 'seen';
-    if (deliveredTo[targetRecipientId]) return 'delivered';
+  // ✅ FIX: If chat metadata hasn't loaded yet, show clock instead of single tick
+  const targetRecipientId = recipientId || userId;
+  const participantsLoaded = chatData?.participants?.length > 0 || targetRecipientId;
+  
+  if (!participantsLoaded) {
+    // Don't show a tick at all until we know who the recipient is
     if (message.id && !message.id.startsWith('temp_')) return 'sent';
-
     return 'sending';
-  };
+  }
+
+  // resolve actual recipient
+  const resolvedRecipient = targetRecipientId || 
+    chatData?.participants?.find(id => id !== currentUserUid);
+
+  if (!resolvedRecipient) {
+    return message.id && !message.id.startsWith('temp_') ? 'sent' : 'sending';
+  }
+
+  const readBy = message.readBy || {};
+  const deliveredTo = message.deliveredTo || {};
+
+  if (readBy[resolvedRecipient]) return 'seen';
+  if (deliveredTo[resolvedRecipient]) return 'delivered';
+  if (message.id && !message.id.startsWith('temp_')) return 'sent';
+  return 'sending';
+};
 
   const renderTicks = (status) => {
     if (!status) return null;
 
     const tickColor = 'rgba(0, 0, 0, 0.7)';
+    const tickseenColor = 'rgba(201, 241, 23, 0.91)';
+    const tickdeliveredColor = 'rgba(0, 0, 0, 0.7)';
 
     try {
       if (status === 'sending') {
         return <Icon name="time-outline" size={14} color="rgba(0, 0, 0, 0.5)" style={styles.tickIcon} />;
       } else if (status === 'seen') {
-        return <Icon name="checkmark-done" size={14} color={tickColor} style={styles.tickIcon} />;
+        return <Icon name="checkmark-done" size={14} color={tickseenColor} style={styles.tickIcon} />;
       } else if (status === 'delivered') {
-        return <Icon name="checkmark-done-outline" size={14} color={tickColor} style={styles.tickIcon} />;
+        return <Icon name="checkmark-done-outline" size={14} color={tickdeliveredColor} style={styles.tickIcon} />;
       } else {
         return <Icon name="checkmark-outline" size={14} color={tickColor} style={styles.tickIcon} />;
       }
@@ -1037,92 +1256,237 @@ const [isFetchingMore, setIsFetchingMore] = useState(false);
     }
   };
 
-  // ─── Render message item ────────────────────────────────────────────────────
-  const renderItem = ({ item }) => {
-    if (item.isSystemMessage || item.senderId === 'system' || item.senderId === 'github') {
-      const isGitHubEvent = item.senderId === 'github' || item.type === 'github_event';
+const downloadMedia = async (item) => {
+   if (item.senderId === currentUserUid) return;
+  const messageId = item.id;
+  const isVideo = item.messageType === 'video';
+  const remoteUrl = isVideo ? item.videoUrl : item.imageUrl;
 
-      return (
-        <View style={[styles.systemMessageContainer, isGitHubEvent && styles.githubMessageContainer]}>
-          <View style={styles.systemMessageContent}>
-            <Icon
-              name={isGitHubEvent ? "logo-github" : "information-circle-outline"}
-              size={16}
-              color={isGitHubEvent ? "#6e5494" : "#007AFF"}
-            />
-            <Text style={[styles.systemMessageText, isGitHubEvent && styles.githubMessageText]}>
-              {item.text}
-            </Text>
-          </View>
-          <Text style={[styles.systemMessageTime, isGitHubEvent && styles.githubMessageTime]}>
-            {item.createdAt
-              ? new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : ''}
-          </Text>
-        </View>
+  if (!remoteUrl) return;
+  if (localMediaPaths.current[messageId]) return;
+
+  setDownloadStates(prev => ({ ...prev, [messageId]: 'downloading' }));
+
+  try {
+    const extension = isVideo ? 'mp4' : 'jpg';
+    const fileName = `chat_${messageId}.${extension}`;
+
+    const destDir = Platform.OS === 'android'
+      ? RNFS.DownloadDirectoryPath
+      : RNFS.DocumentDirectoryPath;
+     
+    const destPath = `${destDir}/${fileName}`;
+
+    // Reuse if already on disk
+    const exists = await RNFS.exists(destPath);
+    if (exists) {
+      localMediaPaths.current[messageId] = destPath;
+      // ✅ Persist to AsyncStorage
+      await AsyncStorage.setItem(
+        'downloadedMediaPaths',
+        JSON.stringify(localMediaPaths.current)
       );
+      setDownloadStates(prev => ({ ...prev, [messageId]: 'done' }));
+      return;
     }
 
-    const messageStatus = getMessageStatus(item);
-    const isUserMessage = item.senderId === currentUserUid;
-    const isDeleted = item.messageType === 'deleted' || item.deletedForEveryone;
+    await RNFS.downloadFile({
+      fromUrl: remoteUrl,
+      toFile: destPath,
+      background: true,
+      discretionary: true,
+    }).promise;
 
+    localMediaPaths.current[messageId] = destPath;
+
+    // ✅ Persist to AsyncStorage so it survives app restarts
+    await AsyncStorage.setItem(
+      'downloadedMediaPaths',
+      JSON.stringify(localMediaPaths.current)
+    );
+
+    setDownloadStates(prev => ({ ...prev, [messageId]: 'done' }));
+
+    if (Platform.OS === 'android') {
+      await RNFS.scanFile(destPath);
+    }
+
+    if (Platform.OS === 'ios') {
+      await CameraRoll.save(`file://${destPath}`, {
+        type: isVideo ? 'video' : 'photo',
+        album: 'Chat Media',
+      });
+    }
+
+    Alert.alert('Saved', isVideo ? 'Video saved to gallery.' : 'Image saved to gallery.');
+  } catch (error) {
+    console.error('Download error:', error);
+    setDownloadStates(prev => ({ ...prev, [messageId]: 'idle' }));
+    Alert.alert('Error', 'Failed to download. Please try again.');
+  }
+};
+
+  // ─── Render message item ────────────────────────────────────────────────────
+  const renderItem = ({ item }) => {
+  // ── System / GitHub messages (unchanged) ──────────────────────────────────
+  if (item.isSystemMessage || item.senderId === 'system' || item.senderId === 'github') {
+    const isGitHubEvent = item.senderId === 'github' || item.type === 'github_event';
     return (
-      <TouchableOpacity
-        activeOpacity={0.9}
-        onLongPress={() => handleLongPressMessage(item)}
-        style={[
-          styles.messageContainer,
-          isUserMessage ? styles.userMessage : styles.botMessage,
-          item.isRequestMessage && styles.requestMessage,
-          item.messageType === 'text' ? styles.textMessage : styles.mediaMessage,
-          isDeleted && styles.deletedMessage,
-        ]}
-      >
-        {isDeleted ? (
-          <View style={styles.deletedMessageContent}>
-            <Icon name="ban-outline" size={14} color="rgba(255,255,255,0.5)" />
-            <Text style={styles.deletedMessageText}>
-              {item.text || 'This message was deleted for everyone'}
-            </Text>
-          </View>
-        ) : (
-          <>
-            {item.messageType === 'image' && item.imageUrl && (
-              <Image
-                source={{ uri: item.imageUrl }}
-                style={styles.messageImage}
-                resizeMode="cover"
-              />
-            )}
+      <View style={[styles.systemMessageContainer, isGitHubEvent && styles.githubMessageContainer]}>
+        <View style={styles.systemMessageContent}>
+          <Icon
+            name={isGitHubEvent ? 'logo-github' : 'information-circle-outline'}
+            size={16}
+            color={isGitHubEvent ? '#6e5494' : '#007AFF'}
+          />
+          <Text style={[styles.systemMessageText, isGitHubEvent && styles.githubMessageText]}>
+            {item.text}
+          </Text>
+        </View>
+        <Text style={[styles.systemMessageTime, isGitHubEvent && styles.githubMessageTime]}>
+          {item.createdAt
+            ? new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : ''}
+        </Text>
+      </View>
+    );
+  }
 
-            {item.messageType === 'video' && item.videoUrl && (
+  const messageStatus = getMessageStatus(item);
+  const isUserMessage = item.senderId === currentUserUid;
+  const isDeleted = item.messageType === 'deleted' || item.deletedForEveryone;
+
+  // ── Download state for this message ───────────────────────────────────────
+  const dlState   = downloadStates[item.id] || 'idle';
+  const localPath = localMediaPaths.current[item.id];
+
+  // Use local file URI if downloaded, otherwise stream from Firebase
+  const getDisplayUri = (remoteUrl, messageId) => {
+  const path = localMediaPaths.current[messageId];
+  if (!path) return remoteUrl;
+  return Platform.OS === 'android' ? `file://${path}` : path;
+};
+
+  return (
+    <TouchableOpacity
+      activeOpacity={0.9}
+      onLongPress={() => handleLongPressMessage(item)}
+      style={[
+        styles.messageContainer,
+        isUserMessage ? styles.userMessage : styles.botMessage,
+        item.isRequestMessage && styles.requestMessage,
+        item.messageType === 'text' ? styles.textMessage : styles.mediaMessage,
+        isDeleted && styles.deletedMessage,
+      ]}
+    >
+      {isDeleted ? (
+        // ── Deleted message ────────────────────────────────────────────────
+        <View style={styles.deletedMessageContent}>
+          <Icon name="ban-outline" size={14} color="rgba(255,255,255,0.5)" />
+          <Text style={styles.deletedMessageText}>
+            {item.text || 'This message was deleted for everyone'}
+          </Text>
+        </View>
+      ) : (
+        <>
+          {/* ── Image message ──────────────────────────────────────────────── */}
+          {item.messageType === 'image' && item.imageUrl && (
+            <View style={styles.mediaWrapper}>
+              <Image
+                source={{ uri: getDisplayUri(item.imageUrl,item.id) }}
+                blurRadius={(!localPath && !isUserMessage) ? 50 : 0}
+                style={[
+                styles.messageImage,
+                 (!localPath && !isUserMessage) && { opacity: 0.8 }
+                  ]}
+                resizeMode="cover"
+                
+              />
+
+              {/* Download overlay — hidden once downloaded */}
+              {!isUserMessage && dlState !== 'done' && (
+                <TouchableOpacity
+                  style={styles.downloadOverlay}
+                  onPress={() => downloadMedia(item)}
+                  disabled={dlState === 'downloading'}
+                  activeOpacity={0.8}
+                >
+                  {dlState === 'downloading' ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <View style={styles.downloadButton}>
+                      <Icon name="arrow-down-outline" size={20} color="#fff" />
+                    </View>
+                  )}
+                </TouchableOpacity>
+              )}
+
+              {/* Green tick badge once saved */}
+              {!isUserMessage && dlState === 'done' &&  (
+                <View style={styles.savedBadge}>
+                  <Icon name="checkmark-circle" size={10} color="#4CAF50" />
+                </View>
+              )}
+            </View>
+          )}
+
+          {/* ── Video message ──────────────────────────────────────────────── */}
+          {item.messageType === 'video' && item.videoUrl && (
+            <View style={styles.mediaWrapper}>
               <Video
-                source={{ uri: item.videoUrl }}
+                source={{ uri: getDisplayUri(item.videoUrl,item.id) }}
                 style={styles.messageVideo}
                 controls
                 resizeMode="cover"
                 paused
               />
-            )}
 
-            {item.messageType === 'text' && (
-              <Text style={styles.messageText}>{item.text}</Text>
-            )}
-          </>
-        )}
+              {/* Download overlay — hidden once downloaded */}
+              {dlState !== 'done' && (
+                <TouchableOpacity
+                  style={styles.downloadOverlay}
+                  onPress={() => downloadMedia(item)}
+                  disabled={dlState === 'downloading'}
+                  activeOpacity={0.8}
+                >
+                  {dlState === 'downloading' ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <View style={styles.downloadButton}>
+                      <Icon name="arrow-down-outline" size={20} color="#fff" />
+                    </View>
+                  )}
+                </TouchableOpacity>
+              )}
 
-        <View style={styles.messageFooter}>
-          <Text style={styles.messageTime}>
-            {item.createdAt
-              ? new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : ''}
-          </Text>
-          {isUserMessage && !isDeleted && messageStatus && renderTicks(messageStatus)}
-        </View>
-      </TouchableOpacity>
-    );
-  };
+              {/* Green tick badge once saved */}
+              {!isUserMessage && dlState === 'done' && (
+                <View style={styles.savedBadge}>
+                  <Icon name="checkmark-circle" size={10} color="#4CAF50" />
+                </View>
+              )}
+            </View>
+          )}
+
+          {/* ── Text message (unchanged) ────────────────────────────────────── */}
+          {item.messageType === 'text' && (
+            <Text style={styles.messageText}>{item.text}</Text>
+          )}
+        </>
+      )}
+
+      {/* ── Timestamp + read ticks (unchanged) ─────────────────────────────── */}
+      <View style={styles.messageFooter}>
+        <Text style={styles.messageTime}>
+          {item.createdAt
+            ? new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : ''}
+        </Text>
+        {isUserMessage && !isDeleted && messageStatus && renderTicks(messageStatus)}
+      </View>
+    </TouchableOpacity>
+  );
+};
 
   // ─── Render helpers ─────────────────────────────────────────────────────────
   const renderAcceptRejectButtons = () => {
@@ -1666,4 +2030,35 @@ paginationLoaderText: {
   fontSize: 12,
   fontWeight: '500',
 },
+
+ mediaWrapper: {
+    position: 'relative',       // lets the overlay sit on top of the image/video
+  },
+  downloadOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 2,
+  },
+  downloadButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  savedBadge: {
+    position: 'absolute',
+    bottom: 3,
+    left: 2,
+  }
+
 });

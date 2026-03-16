@@ -30,6 +30,8 @@ const HomeScreen = () => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(false);
   const [logoLoaded, setLogoLoaded] = useState(false);
+  // Add this state
+const [showPassword, setShowPassword] = useState(false);
 
  
 
@@ -334,16 +336,31 @@ const HomeScreen = () => {
         style={styles.input}
         placeholder='Enter email'
         keyboardType='email-address'
+        placeholderTextColor='#999' 
+
         value={email}
         onChangeText={setEmail}
       />
 
-      <TextInput
-        style={styles.input2}
-        placeholder='Enter password'
-        value={password}
-        onChangeText={setPassword}
-      />
+<View style={styles.passwordContainer}>
+       <TextInput
+    style={styles.passwordInput}
+    placeholder='Enter password'
+    placeholderTextColor='#999'
+    secureTextEntry={!showPassword}
+    value={password}
+    onChangeText={setPassword}
+    color='#000'
+  />
+  <TouchableOpacity
+    onPress={() => setShowPassword(!showPassword)}
+    style={styles.eyeButton}
+  >
+    <Text style={{ fontSize: 18 }}>
+      {showPassword ? '🙈' : '👁️'}
+    </Text>
+  </TouchableOpacity>
+  </View>
 
       <TouchableOpacity style={styles.Pressable} onPress={handleSignIn}>
         
@@ -451,6 +468,7 @@ const styles = StyleSheet.create({
     elevation:10,
     shadowOpacity:0.1,
     shadowRadius:4,
+    color:'#000'
   },
   input2: {
     width: 350,
@@ -469,6 +487,7 @@ const styles = StyleSheet.create({
     ShadowOffset:{width:0,height:2},
     elevation:10,
     borderBottomWidth:1,
+    color:'000'
   },
   text3: {
     marginTop: 2,
@@ -533,6 +552,28 @@ const styles = StyleSheet.create({
   height: 18,
   marginRight: 12,
   
+},
+passwordContainer: {
+  width: 350,
+  height: 55,
+  backgroundColor: 'white',
+  flexDirection: 'row',
+  alignItems: 'center',
+  marginTop: 10,
+  borderBottomWidth: 1,
+  borderBottomColor: '#FF6D1F',
+},
+passwordInput: {
+  flex: 1,
+  height: 55,
+  paddingHorizontal: 15,
+  fontWeight: 'bold',
+  color: '#000',
+},
+eyeButton: {
+  paddingHorizontal: 12,
+  justifyContent: 'center',
+  alignItems: 'center',
 },
 
 

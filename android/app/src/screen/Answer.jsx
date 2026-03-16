@@ -231,9 +231,17 @@ const submitReplyToAnswer = async () => {
           ) : question && (
             <View style={styles.questionPreview}>
               <Text style={styles.questionPreviewLabel}>Answering:</Text>
-              <Text style={styles.questionPreviewTitle} numberOfLines={2}>
-                {question.title}
-              </Text>
+              <View style={styles.questionHeader}>
+                {question.userImage ? (
+                  <Image
+                    source={{ uri: getCachedImageUri(question.userImage) || question.userImage }}
+                    style={styles.questionAvatar}
+                  />
+                ) : null}
+                <Text style={styles.questionPreviewTitle} numberOfLines={2}>
+                  {question.title}
+                </Text>
+              </View>
             </View>
           )}
 
@@ -324,6 +332,17 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 8,
     marginBottom: 16,
+  },
+  questionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  questionAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    marginRight: 8,
   },
   questionPreviewLabel: {
     fontSize: 12,

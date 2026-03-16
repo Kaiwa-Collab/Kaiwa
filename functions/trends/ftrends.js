@@ -10,6 +10,35 @@ if (!admin.apps.length) {
 const trendCache = new Map();
 const TREND_CACHE_TTL = 5 * 60 * 1000;
 
+// ==================== PAGINATION HELPER ====================
+/**
+ * Paginates an array of items using cursor-based (index) pagination.
+ * @param {Array} items - Full sorted array
+ * @param {number} page - 1-based page number
+ * @param {number} pageSize - Items per page
+ * @returns {{ data, pagination }}
+ */
+function paginateArray(items, page = 1, pageSize = 10) {
+  const safePage = Math.max(1, parseInt(page) || 1);
+  const safeSize = Math.min(50, Math.max(1, parseInt(pageSize) || 10));
+  const totalItems = items.length;
+  const totalPages = Math.ceil(totalItems / safeSize);
+  const startIndex = (safePage - 1) * safeSize;
+  const endIndex = startIndex + safeSize;
+
+  return {
+    data: items.slice(startIndex, endIndex),
+    pagination: {
+      page: safePage,
+      pageSize: safeSize,
+      totalItems,
+      totalPages,
+      hasNextPage: safePage < totalPages,
+      hasPrevPage: safePage > 1,
+    },
+  };
+}
+
 // ==================== HELPER FUNCTIONS ====================
 function getCachedTrend(key) {
   const cached = trendCache.get(key);
@@ -49,7 +78,7 @@ async function fetchGitHubTrendingHelper(params) {
         q: query,
         sort: 'stars',
         order: 'desc',
-        per_page: 20,
+        per_page: 20, // Fetch max from API, paginate locally
       },
       headers: {
         Accept: 'application/vnd.github.v3+json',
@@ -81,7 +110,8 @@ async function fetchHackerNewsTrendingHelper() {
     'https://hacker-news.firebaseio.com/v0/topstories.json'
   );
 
-  const ids = topStories.data.slice(0, 10);
+  // Fetch up to 100 stories so we have enough to paginate
+  const ids = topStories.data.slice(0, 20);
 
   const stories = await Promise.all(
     ids.map(async (id) => {
@@ -119,7 +149,7 @@ async function fetchDevToTrendingHelper(params) {
     {
       params: {
         tag,
-        per_page: limit,
+        per_page: Math.min(limit, 20), 
         top: 7,
       },
     }
@@ -193,7 +223,7 @@ exports.updateTrendingPosts = onSchedule(
 
       const trendingPosts = postsWithScores
         .sort((a, b) => b.trendingScore - a.trendingScore)
-        .slice(0, 30);
+        .slice(0, 300); // Store more posts to support deeper pagination
 
       await admin.firestore()
         .collection('aggregated')
@@ -214,94 +244,146 @@ exports.updateTrendingPosts = onSchedule(
   }
 );
 
-// ==================== GITHUB TRENDING (OFFICIAL) ====================
+// ==================== GITHUB TRENDING (PAGINATED) ====================
 exports.fetchGitHubTrending = onCall(async (request) => {
   try {
-    const { language = 'javascript', days = 7 } = request.data || {};
-    const repos = await fetchGitHubTrendingHelper({ language, days });
-    return repos;
+    const {
+      language = 'javascript',
+      days = 7,
+      page = 1,
+      pageSize = 10,
+    } = request.data || {};
+
+    const cacheKey = `github_${language}_${days}`;
+    let repos = getCachedTrend(cacheKey);
+
+    if (!repos) {
+      repos = await fetchGitHubTrendingHelper({ language, days });
+      setCachedTrend(cacheKey, repos);
+    }
+
+    const { data, pagination } = paginateArray(repos, page, pageSize);
+
+    return { data, pagination };
   } catch (error) {
     console.error('❌ GitHub trending error:', error.message);
     throw new HttpsError('internal', 'Failed to fetch GitHub trends');
   }
 });
 
-// ==================== HACKER NEWS TRENDING ====================
+// ==================== HACKER NEWS TRENDING (PAGINATED) ====================
 exports.fetchHackerNewsTrending = onCall(async (request) => {
   try {
-    const stories = await fetchHackerNewsTrendingHelper();
-    return stories;
+    const { page = 1, pageSize = 10 } = request.data || {};
+
+    const cacheKey = 'hackernews';
+    let stories = getCachedTrend(cacheKey);
+
+    if (!stories) {
+      stories = await fetchHackerNewsTrendingHelper();
+      setCachedTrend(cacheKey, stories);
+    }
+
+    const { data, pagination } = paginateArray(stories, page, pageSize);
+
+    return { data, pagination };
   } catch (error) {
     console.error('❌ HN error:', error.message);
     throw new HttpsError('internal', 'Failed to fetch Hacker News trends');
   }
 });
 
-// ==================== DEV.TO TRENDING ====================
+// ==================== DEV.TO TRENDING (PAGINATED) ====================
 exports.fetchDevToTrending = onCall(async (request) => {
   try {
-    const { tag = 'react', limit = 20 } = request.data || {};
-    const articles = await fetchDevToTrendingHelper({ tag, limit });
-    return articles;
+    const {
+      tag = 'react',
+      page = 1,
+      pageSize = 10,
+    } = request.data || {};
+
+    const cacheKey = `devto_${tag}`;
+    let articles = getCachedTrend(cacheKey);
+
+    if (!articles) {
+      articles = await fetchDevToTrendingHelper({ tag, limit: 100 });
+      setCachedTrend(cacheKey, articles);
+    }
+
+    const { data, pagination } = paginateArray(articles, page, pageSize);
+
+    return { data, pagination };
   } catch (error) {
     console.error('❌ Dev.to error:', error.message);
     throw new HttpsError('internal', 'Failed to fetch Dev.to trends');
   }
 });
 
-// ==================== UNIFIED TREND FEED ====================
+// ==================== UNIFIED TREND FEED (PAGINATED) ====================
 exports.fetchTrends = onCall(async (request) => {
-  const { language = 'javascript', tag = 'react' } = request.data || {};
+  const {
+    language = 'javascript',
+    tag = 'react',
+    page = 1,
+    pageSize = 10,
+  } = request.data || {};
 
   const cacheKey = `trends_${language}_${tag}`;
+  let allData = getCachedTrend(cacheKey);
 
-  const cached = getCachedTrend(cacheKey);
-  if (cached) {
-    return {
-      ...cached,
-      cached: true,
-    };
-  }
+  if (!allData) {
+    console.log('🌐 Fetching fresh trends...');
 
-  console.log('🌐 Fetching fresh trends...');
-
-  try {
     const [github, hn, devto] = await Promise.allSettled([
       fetchGitHubTrendingHelper({ language }),
       fetchHackerNewsTrendingHelper(),
       fetchDevToTrendingHelper({ tag }),
     ]);
 
-    const result = {
+    allData = {
       github: github.status === 'fulfilled' ? github.value : [],
       hackerNews: hn.status === 'fulfilled' ? hn.value : [],
       devto: devto.status === 'fulfilled' ? devto.value : [],
       generatedAt: new Date().toISOString(),
     };
 
-    setCachedTrend(cacheKey, result);
-
-    return {
-      ...result,
-      cached: false,
-    };
-  } catch (error) {
-    console.error('❌ fetchTrends error:', error.message);
-    throw new HttpsError('internal', 'Failed to fetch trends');
+    setCachedTrend(cacheKey, allData);
   }
+
+  // Paginate each feed independently
+  const githubPaginated = paginateArray(allData.github, page, pageSize);
+  const hnPaginated = paginateArray(allData.hackerNews, page, pageSize);
+  const devtoPaginated = paginateArray(allData.devto, page, pageSize);
+
+  return {
+    github: githubPaginated.data,
+    hackerNews: hnPaginated.data,
+    devto: devtoPaginated.data,
+    pagination: {
+      github: githubPaginated.pagination,
+      hackerNews: hnPaginated.pagination,
+      devto: devtoPaginated.pagination,
+    },
+    generatedAt: allData.generatedAt,
+    cached: true,
+  };
 });
 
+// ==================== TRENDING QUESTIONS (PAGINATED) ====================
 exports.getTrendingQuestions = onCall(async (request) => {
   try {
+    const { page = 1, pageSize = 10 } = request.data || {};
+
     const db = admin.firestore();
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
+    // Fetch a larger set so we can paginate over it
     const questionsSnapshot = await db
       .collection('questions')
       .where('timestamp', '>=', thirtyDaysAgo)
       .orderBy('timestamp', 'desc')
-      .limit(100)
+      .limit(200)
       .get();
 
     const questions = questionsSnapshot.docs.map(doc => {
@@ -328,9 +410,11 @@ exports.getTrendingQuestions = onCall(async (request) => {
       };
     });
 
-    return questions
-      .sort((a, b) => b.trendingScore - a.trendingScore)
-      .slice(0, 10);
+    // Sort by trending score first, then paginate
+    const sorted = questions.sort((a, b) => b.trendingScore - a.trendingScore);
+    const { data, pagination } = paginateArray(sorted, page, pageSize);
+
+    return { data, pagination };
 
   } catch (error) {
     console.error('❌ Error fetching trending questions:', error);

@@ -22,6 +22,7 @@ const signUp_G = () => {
   useEffect(()=>{
     GoogleSignin.configure({
   webClientId: '686349209176-7mlrurvferkssq874oncl4dkk3ajpp0e.apps.googleusercontent.com',
+  
 });
   },[])
 const navigation = useNavigation();
@@ -29,6 +30,8 @@ const navigation = useNavigation();
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  // const [showPassword, setShowPassword] = useState(false);
 
  const handleSignUp = async () => {
   if(!email || !password){
@@ -199,17 +202,32 @@ return(
             style={styles.input}
             placeholder='Enter email'
             keyboardType='email-address'
+            placeholderTextColor='#999'
             value={email}
             onChangeText={setEmail}
           />
 
-    
-          <TextInput
-            style={styles.input2}
-            placeholder='Enter password'
-            value={password}
-            onChangeText={setPassword}
-          />
+          <View style={styles.passwordContainer}>
+            <TextInput
+              style={styles.passwordInput}
+              placeholder='Enter password'
+              placeholderTextColor='#999'
+              secureTextEntry={!showPassword}
+              value={password}
+              onChangeText={setPassword}
+              color='#000'
+            />
+            <TouchableOpacity
+              onPress={() => setShowPassword(!showPassword)}
+              style={styles.eyeButton}
+            >
+              <Text style={{ fontSize: 18 }}>
+                {showPassword ? '🙈' : '👁️'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+          {/* /> */}
+          
           <TouchableOpacity style={styles.Pressable} onPress={handleSignUp}>
           
                   <Text style={styles.text2}>
@@ -267,6 +285,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     shadowOpacity: 1,
     paddingHorizontal: 15,
+    color:'#000',
   },
   input2: {
     width: 350,
@@ -277,6 +296,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     shadowOpacity: 1,
     paddingHorizontal: 15,
+    color:'#000',
   },
   text3: {
     marginTop: 2,
@@ -327,8 +347,29 @@ const styles = StyleSheet.create({
   width: 18,
   height: 18,
   marginRight: 12,
-  
-},
+  },
+  passwordContainer: {
+    width: 350,
+    height: 55,
+    backgroundColor: 'white',
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#FF6D1F',
+  },
+  passwordInput: {
+    flex: 1,
+    height: 55,
+    paddingHorizontal: 15,
+    fontWeight: 'bold',
+    color: '#000',
+  },
+  eyeButton: {
+    paddingHorizontal: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
 
   signupcontainer:{
     flexDirection: 'row',

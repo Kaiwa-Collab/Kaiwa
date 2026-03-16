@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback,useRef } from 'react';
 import { 
   StyleSheet, Text, View, FlatList, ActivityIndicator, TextInput, 
   TouchableOpacity, Alert, Image, StatusBar, Platform, Linking
@@ -8,6 +8,7 @@ import auth from '@react-native-firebase/auth';
 import functions from '@react-native-firebase/functions';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useUserData } from '../users'; 
+import ProjectDetailsModal from '../../service/ProjectDetailsModal';
 
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 
@@ -30,7 +31,14 @@ const Search = () => {
 
   const navigation = useNavigation();
   const currentUserUid = auth().currentUser.uid;
-
+  const [selectedProject, setSelectedProject] = useState(null);
+const [projectModalVisible, setProjectModalVisible] = useState(false);
+// Add these state variables
+const [trendsPage, setTrendsPage] = useState(1);
+const [trendsPagination, setTrendsPagination] = useState(null);
+const [loadingMore, setLoadingMore] = useState(false);
+const SUGGESTIONS_TTL = 5 * 60 * 1000; // 5 minutes
+const lastFetchedAt = useRef(null);
   const {
     getCachedImageUri,
   } = useUserData();
@@ -62,45 +70,63 @@ const Search = () => {
     }
   }, []);
 
-  useFocusEffect(
-    useCallback(() => {
-      fetchFollowRequestsCount();
-      fetchSearchSuggestions();
-      fetchProjectSuggestions();
-    }, [fetchFollowRequestsCount, fetchSearchSuggestions, fetchProjectSuggestions])
-  );
+ useFocusEffect(
+  useCallback(() => {
+    fetchFollowRequestsCount();
+    const now = Date.now();
+    const isFresh = lastFetchedAt.current && 
+                    (now - lastFetchedAt.current) < SUGGESTIONS_TTL;
+    if (!isFresh) { // skip if fetched recently
 
+    fetchFollowRequestsCount();
+    fetchSearchSuggestions();
+    fetchProjectSuggestions();
+    lastFetchedAt.current = now;
+    }
+  }, [fetchFollowRequestsCount, fetchSearchSuggestions, fetchProjectSuggestions])
+);
   // ✅ Load trends on mount (always visible)
   useEffect(() => {
     loadTrends();
   }, []);
 
-  const loadTrends = async () => {
-    setLoading(true);
-    try {
-      const fetchTrendsFunction = functions().httpsCallable('fetchTrends');
-      const result = await fetchTrendsFunction({
-        language: 'javascript',
-        tag: 'react'
-      });
+  // Replace your loadTrends function
+const loadTrends = async (page = 1) => {
+  if (page === 1) setLoading(true);
+  else setLoadingMore(true);
 
-      console.log('✅ Trends loaded:', result.data);
+  try {
+    const fetchTrendsFunction = functions().httpsCallable('fetchTrends');
+    const result = await fetchTrendsFunction({
+      language: 'javascript',
+      tag: 'react',
+      page,
+      pageSize: 10,
+    });
 
-      const allTrends = [
-        ...(result.data.github || []),
-        ...(result.data.hackerNews || []),
-        ...(result.data.devto || [])
-      ];
+    const { github = [], hackerNews = [], devto = [], pagination } = result.data;
 
-      const shuffled = shuffleArray(allTrends);
-      setTrends(shuffled.slice(0, 50));
-    } catch (err) {
-      console.error('❌ Error loading trends:', err);
-      Alert.alert('Error', 'Could not load trends. Please try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
+    const allTrends = shuffleArray([...github, ...hackerNews, ...devto]);
+
+    setTrends(prev => page === 1 ? allTrends : [...prev, ...allTrends]);
+    setTrendsPagination(pagination);
+    setTrendsPage(page);
+  } catch (err) {
+    Alert.alert('Error', 'Could not load trends. Please try again.');
+  } finally {
+    setLoading(false);
+    setLoadingMore(false);
+  }
+};
+
+// Add this load-more handler
+const loadMoreTrends = () => {
+  if (loadingMore) return;
+  const hasMore = trendsPagination?.github?.hasNextPage 
+    || trendsPagination?.hackerNews?.hasNextPage 
+    || trendsPagination?.devto?.hasNextPage;
+  if (hasMore) loadTrends(trendsPage + 1);
+};
 
   const shuffleArray = (array) => {
     const shuffled = [...array];
@@ -249,12 +275,8 @@ const Search = () => {
   };
 
   const onProjectPress = async (project) => {
-    await saveprojectSuggestion(project);
-
-    navigation.navigate('ProjectDetails', {
-      projectId: project.id,
-      title: project.title
-    });
+   setSelectedProject(project);
+  setProjectModalVisible(true);
   };
 
 const linknormalization=(url)=>{
@@ -493,22 +515,28 @@ const linknormalization=(url)=>{
           {loading && <ActivityIndicator style={{ margin: 10 }} color="#ff6d1f" />}
           
           <FlatList
-            data={trends}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => renderTrendResult(item)}
-            ListEmptyComponent={() =>
-              !loading && (
-                <View style={styles.emptyState}>
-                  <Ionicons name="trending-up" size={64} color="#ccc" />
-                  <Text style={styles.emptyStateText}>
-                    No trends available at the moment.
-                  </Text>
-                </View>
-              )
-            }
-            showsVerticalScrollIndicator={false}
-            scrollEnabled={true}
-          />
+  data={trends}
+  keyExtractor={(item) => item.id}
+  renderItem={({ item }) => renderTrendResult(item)}
+  onEndReached={loadMoreTrends}
+  onEndReachedThreshold={0.4}
+  ListFooterComponent={() =>
+    loadingMore ? (
+      <ActivityIndicator style={{ margin: 16 }} color="#ff6d1f" />
+    ) : null
+  }
+  ListEmptyComponent={() =>
+    !loading && (
+      <View style={styles.emptyState}>
+        <Ionicons name="trending-up" size={64} color="#ccc" />
+        <Text style={styles.emptyStateText}>No trends available.</Text>
+      </View>
+    )
+  }
+  showsVerticalScrollIndicator={false}
+/>
+            {/* scrollEnabled={true} */}
+          
         </>
       );
     }
@@ -572,6 +600,16 @@ const linknormalization=(url)=>{
           {renderContent()}
         </>
       )}
+
+        <ProjectDetailsModal
+        visible={projectModalVisible}
+        project={selectedProject}
+        onClose={() => {
+          setProjectModalVisible(false);
+          setSelectedProject(null);
+        }}
+      />
+
     </View>
   );
 };
@@ -580,7 +618,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#1e1e1e',
-    padding: 16,
+    paddingHorizontal: 16,
   },
   statusBarSpacer: { 
     height: getStatusBarHeight(), 
@@ -611,7 +649,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     backgroundColor: '#2c2c32',
     borderRadius: 10,
-    padding: 4,
+    paddingHorizontal: 4,
     marginBottom: 12,  
   },
   tab: {
@@ -786,7 +824,7 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     backgroundColor: '#1e1e1e',
-    padding: 16,
+    paddingHorizontal: 16,
     zIndex: 10,
   },
   removeSuggestionButton: {

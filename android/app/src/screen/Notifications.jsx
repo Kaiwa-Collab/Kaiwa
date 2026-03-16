@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNotifications } from '../NotificationsContext';
 import {
   View,
   Text,
@@ -20,37 +21,26 @@ import { useNavigation } from '@react-navigation/native';
 import chatService from './chatService';
 import functions from '@react-native-firebase/functions';
 import { getGitHubStatus } from '../../service/getGitHubStatus';
+import ProjectDetailsModal from '../../service/ProjectDetailsModal';
 
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 
 const Notifications = () => {
-  const [notifications, setNotifications] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const { notifications, loading } = useNotifications();
   const [refreshing, setRefreshing] = useState(false);
   const [followRequests, setFollowRequests] = useState([]);
   const [showRequests, setShowRequests] = useState(false);
-  const [selectedCollaboration, setSelectedCollaboration] = useState(null);
-  const [showCollaborationDetails, setShowCollaborationDetails] = useState(false);
   const [loadingCollabDetails, setLoadingCollabDetails] = useState(false);
+  const [projectDetailsVisible, setProjectDetailsVisible] = useState(false);
+  const [selectedProjectForDetails, setSelectedProjectForDetails] = useState(null);
+  const [selectedCollaborationNotification, setSelectedCollaborationNotification] = useState(null);
+  const [acceptingInvite, setAcceptingInvite] = useState(false);
+  const [rejectingInvite, setRejectingInvite] = useState(false);
   const currentUserUid = auth().currentUser?.uid;
   const navigation = useNavigation();
 
   useEffect(() => {
     if (!currentUserUid) return;
-
-    const unsubscribeNotifications = firestore()
-      .collection('notifications')
-      .where('recipientUid', '==', currentUserUid)
-      .orderBy('createdAt', 'desc')
-      .limit(50)
-      .onSnapshot(snapshot => {
-        const notificationsList = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-        setNotifications(notificationsList);
-        setLoading(false);
-      });
 
     const unsubscribeFollowRequests = firestore()
       .collection('profile')
@@ -66,7 +56,6 @@ const Notifications = () => {
       });
 
     return () => {
-      unsubscribeNotifications();
       unsubscribeFollowRequests();
     };
   }, [currentUserUid]);
@@ -209,24 +198,23 @@ const Notifications = () => {
     }
   };
 
-  // Fetch collaboration details
-  const fetchCollaborationDetails = async (projectId) => {
+  // Fetch collaboration details and show ProjectDetailsModal (for collaboration_invite)
+  const fetchAndShowProjectDetails = async (notification) => {
+    const projectId = notification.data?.projectId;
+    if (!projectId) return;
     setLoadingCollabDetails(true);
     try {
       const projectDoc = await firestore().collection('collaborations').doc(projectId).get();
-      
       if (projectDoc.exists) {
         const projectData = projectDoc.data();
-        setSelectedCollaboration({
-          id: projectDoc.id,
-          ...projectData
-        });
-        setShowCollaborationDetails(true);
+        const project = { id: projectDoc.id, ...projectData };
+        setSelectedProjectForDetails(project);
+        setSelectedCollaborationNotification(notification);
+        setProjectDetailsVisible(true);
       } else {
         Alert.alert('Error', 'Collaboration project not found');
       }
     } catch (error) {
-      
       Alert.alert('Error', 'Failed to load collaboration details');
     } finally {
       setLoadingCollabDetails(false);
@@ -251,7 +239,9 @@ const acceptCollaborationInvite = async (notification) => {
           {
             text: 'Connect GitHub',
             onPress: () => {
-              setShowCollaborationDetails(false);
+              setProjectDetailsVisible(false);
+              setSelectedProjectForDetails(null);
+              setSelectedCollaborationNotification(null);
               navigation.navigate('Settings'); // Navigate to GitHub connection
             },
           },
@@ -332,7 +322,7 @@ const acceptCollaborationInvite = async (notification) => {
     // Step 9: Notify project creator
     const creatorId = projectData.creatorId;
     await createNotification(creatorId, 'collaboration_accepted', {
-      message: `@${status.username} has joined your project "${projectData.title}"`,
+      message: `${userData.username || 'User'} (@${status.username}) has joined your project "${projectData.title}"`,
       senderUsername: userData.username || 'User',
       projectId: projectId,
       projectTitle: projectData.title,
@@ -365,7 +355,9 @@ const acceptCollaborationInvite = async (notification) => {
       }
     }
 
-    setShowCollaborationDetails(false);
+    setProjectDetailsVisible(false);
+    setSelectedProjectForDetails(null);
+    setSelectedCollaborationNotification(null);
 
     Alert.alert(
       '✅ Almost There!',
@@ -432,112 +424,161 @@ const acceptCollaborationInvite = async (notification) => {
       // Delete the notification
       await deleteNotification(notification.id);
 
-      setShowCollaborationDetails(false);
+      setProjectDetailsVisible(false);
+      setSelectedProjectForDetails(null);
+      setSelectedCollaborationNotification(null);
       Alert.alert('Success', 'Collaboration invite rejected');
     } catch (error) {
       
       Alert.alert('Error', 'Failed to reject collaboration invite');
     }
   };
-
- const handleNotificationPress = async (notification) => {
-  // Don't auto-mark follow requests and messages as read - they should remain until manually removed
-  const persistentTypes = ['follow_request', 'message', 'message_request'];
-  if (!notification.read && !persistentTypes.includes(notification.type)) {
+const handleNotificationPress = async (notification) => {
+   const actionRequiredTypes = [
+    
+    'follow_request',
+    'collaboration_invite', 
+    'project_join_request'
+  ];
+  if (!notification.read && !actionRequiredTypes.includes(notification.type)) {
     await markAsRead(notification.id);
   }
+
+  const navigateToChat = async (chatId, projectTitle) => {
+    try {
+      const chatDoc = await firestore().collection('chats').doc(chatId).get();
+      if (!chatDoc.exists) {
+        Alert.alert('Error', 'Chat not found. The collaboration may have been deleted.');
+        return;
+      }
+      const chatData = chatDoc.data();
+      navigation.navigate('ChatScreen', {
+        chatId,
+        title: chatData.name || projectTitle || 'Collaboration Chat',
+        avatar: null,
+        userId: null,
+        isGroupChat: true,
+        groupChatData: {
+          name: chatData.name || projectTitle,
+          participants: chatData.participants || [],
+          participantsInfo: chatData.participantsInfo || {},
+        },
+      });
+    } catch (error) {
+      Alert.alert('Error', 'Failed to open collaboration chat. Please try again.');
+    }
+  };
+
+  const navigateToChatViaProject = async (projectId, projectTitle) => {
+    try {
+      const projectDoc = await firestore().collection('collaborations').doc(projectId).get();
+      if (!projectDoc.exists || !projectDoc.data().chatId) {
+        Alert.alert('Error', 'Project or chat not found.');
+        return;
+      }
+      await navigateToChat(projectDoc.data().chatId, projectTitle);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to open chat.');
+    }
+  };
 
   switch (notification.type) {
     case 'follow_request':
       setShowRequests(true);
       break;
+
     case 'follow_accepted':
     case 'new_follower':
-      navigation.navigate('Profile', { userId: notification.senderUid });
+      navigation.navigate('Profile', { screen: 'Profile', params: { userId: notification.senderUid } });
       break;
+
     case 'collaboration_invite':
-      await fetchCollaborationDetails(notification.data.projectId);
+      await fetchAndShowProjectDetails(notification);
       break;
+
+    case 'project_join_request':
+      navigation.navigate('Profile', { screen: 'Profile', params: { userId: notification.fromUserId } });
+      break;
+
     case 'collaboration_accepted':
     case 'collaboration_active':
-      // Navigate to the collaboration project chat
       if (notification.data?.chatId) {
-        try {
-          // Fetch the chat data first to ensure it exists
-          const chatDoc = await firestore()
-            .collection('chats')
-            .doc(notification.data.chatId)
-            .get();
-          
-          if (!chatDoc.exists) {
-            Alert.alert('Error', 'Chat not found. The collaboration may have been deleted.');
-            return;
-          }
-          
-          const chatData = chatDoc.data();
-          
-          // Navigate to chat screen with proper data
-          navigation.navigate('ChatScreen', { 
-            chatId: notification.data.chatId,
-            title: chatData.name || notification.data.projectTitle || 'Collaboration Chat',
-            avatar: null, // Group chats typically don't have avatars
-            userId: null, // Not applicable for group chats
-            isGroupChat: true,
-            groupChatData: {
-              name: chatData.name || notification.data.projectTitle,
-              participants: chatData.participants || [],
-              participantsInfo: chatData.participantsInfo || {}
-            }
-          });
-        } catch (error) {
-          
-          Alert.alert('Error', 'Failed to open collaboration chat. Please try again.');
-        }
+        await navigateToChat(notification.data.chatId, notification.data?.projectTitle);
       } else if (notification.data?.projectId) {
-        // Fallback: fetch project to get chatId
-        try {
-          const projectDoc = await firestore()
-            .collection('collaborations')
-            .doc(notification.data.projectId)
-            .get();
-          
-          if (projectDoc.exists && projectDoc.data().chatId) {
-            const chatId = projectDoc.data().chatId;
-            const chatDoc = await firestore()
-              .collection('chats')
-              .doc(chatId)
-              .get();
-            
-            if (chatDoc.exists) {
-              const chatData = chatDoc.data();
-              navigation.navigate('ChatScreen', { 
-                chatId: chatId,
-                title: chatData.name || notification.data.projectTitle || 'Collaboration Chat',
-                avatar: null,
-                userId: null,
-                isGroupChat: true,
-                groupChatData: {
-                  name: chatData.name || notification.data.projectTitle,
-                  participants: chatData.participants || [],
-                  participantsInfo: chatData.participantsInfo || {}
-                }
-              });
-            } else {
-              Alert.alert('Error', 'Chat not found.');
-            }
-          } else {
-            Alert.alert('Error', 'Project or chat not found.');
-          }
-        } catch (error) {
-          
-          Alert.alert('Error', 'Failed to open chat.');
-        }
+        await navigateToChatViaProject(notification.data.projectId, notification.data?.projectTitle);
       } else {
         Alert.alert('Error', 'Chat information not found in notification.');
       }
       break;
-    default:
+
+    case 'join_request_accepted':
+      Alert.alert(
+        '🎉 Request Accepted!',
+        `You've been added to "${notification.data?.projectTitle}".\n\n📧 Check your GitHub email and accept the repository invitation to start contributing.`,
+        [
+          {
+            text: 'Open GitHub Notifications',
+            onPress: () => {
+              const { Linking } = require('react-native');
+              Linking.openURL('https://github.com/notifications');
+            },
+          },
+          {
+            text: 'Go to Chat',
+            onPress: async () => {
+              if (notification.data?.chatId) {
+                await navigateToChat(notification.data.chatId, notification.data?.projectTitle);
+              } else if (notification.data?.projectId) {
+                await navigateToChatViaProject(notification.data.projectId, notification.data?.projectTitle);
+              }
+            },
+          },
+          { text: 'OK', style: 'cancel' },
+        ]
+      );
       break;
+
+    case 'join_request_rejected':
+      Alert.alert(
+        'Request Declined',
+        notification.data?.message || `Your request to join "${notification.data?.projectTitle}" was declined.`
+      );
+      break;
+
+    default:
+      // For all other notifications with a sender, open sender's profile
+      const uid = notification.senderUid || notification.fromUserId;
+      if (uid) {
+        navigation.navigate('Profile', { screen: 'Profile', params: { userId: uid } });
+      }
+      break;
+  }
+};
+
+const handleAcceptJoinRequest = async (notification) => {
+  try {
+    await functions().httpsCallable('acceptProjectJoinRequest')({
+      notificationId: notification.id,
+      projectId: notification.projectId,
+      applicantId: notification.fromUserId,
+    });
+    Alert.alert('Accepted!', `${notification.fromUsername || 'User'} has been added to the project.`);
+  } catch (error) {
+    Alert.alert('Error', error.message || 'Could not accept join request.');
+  }
+};
+
+const handleRejectJoinRequest = async (notification) => {
+  try {
+    await functions().httpsCallable('rejectProjectJoinRequest')({
+      notificationId: notification.id,
+      projectId: notification.projectId,
+      applicantId: notification.fromUserId,
+      projectTitle: notification.projectTitle,
+    });
+    Alert.alert('Done', 'Join request declined.');
+  } catch (error) {
+    Alert.alert('Error', error.message || 'Could not reject join request.');
   }
 };
 
@@ -559,6 +600,12 @@ const acceptCollaborationInvite = async (notification) => {
       return 'checkmark-done-outline';
     case 'collaboration_active':
       return 'rocket-outline';
+    case 'project_join_request':
+      return 'people-circle-outline';
+    case 'join_request_accepted':
+      return 'checkmark-circle-outline';
+    case 'join_request_rejected':
+      return 'close-circle-outline';
       default:
         return 'notifications-outline';
       
@@ -582,7 +629,13 @@ const acceptCollaborationInvite = async (notification) => {
        case 'collaboration_accepted':
       return '#27ae60';
     case 'collaboration_active':
-      return '#16a085'; // New case
+      return '#16a085'; 
+    case 'project_join_request':
+      return '#8e44ad';
+    case 'join_request_accepted':
+      return '#27ae60';
+    case 'join_request_rejected':
+      return '#e74c3c';
       default:
         return '#95a5a6';
     }
@@ -609,10 +662,18 @@ const acceptCollaborationInvite = async (notification) => {
       return notification.data?.message || `${senderName} accepted your collaboration invite`;
     case 'collaboration_active':
       return notification.data?.message || 'Your collaboration project is now active!'; // New case
+    case 'project_join_request':
+      return `${notification.fromUsername || 'Someone'} wants to join your project "${notification.projectTitle}"`;
+    case 'join_request_accepted':
+      return notification.data?.message || `Your join request was accepted!`;
+    case 'join_request_rejected':
+      return notification.data?.message || `Your join request was declined.`;
+
     default:
       return notification.data?.message || 'You have a new notification';
   }
   };
+
 
   const formatTimeAgo = (timestamp) => {
     if (!timestamp) return 'Recently';
@@ -642,35 +703,31 @@ const acceptCollaborationInvite = async (notification) => {
   }
 
   const renderNotificationActions = (item) => {
-    if (item.type === 'collaboration_invite') {
-      return (
-        <View style={styles.actionButtons}>
-          <TouchableOpacity
-            style={styles.acceptButtonSmall}
-            onPress={(e) => {
-              e.stopPropagation();
-              acceptCollaborationInvite(item);
-            }}
-          >
-            <Text style={styles.actionButtonText}>Accept</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.rejectButtonSmall}
-            onPress={(e) => {
-              e.stopPropagation();
-              rejectCollaborationInvite(item);
-            }}
-          >
-            <Text style={styles.actionButtonText}>Reject</Text>
-          </TouchableOpacity>
-        </View>
-      );
-    }
+    // collaboration_invite: Accept/Reject are in ProjectDetailsModal
+    if (item.type === 'project_join_request') {
+    return (
+      <View style={styles.actionButtons}>
+        <TouchableOpacity
+          style={styles.acceptButtonSmall}
+          onPress={(e) => { e.stopPropagation(); handleAcceptJoinRequest(item); }}
+        >
+          <Text style={styles.actionButtonText}>Accept</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.rejectButtonSmall}
+          onPress={(e) => { e.stopPropagation(); handleRejectJoinRequest(item); }}
+        >
+          <Text style={styles.actionButtonText}>Reject</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
     return null;
   };
 
   const renderNotification = ({ item }) => (
     <TouchableOpacity
+      activeOpacity={1}
       style={[
         styles.notificationItem,
         !item.read && styles.unreadNotification
@@ -687,9 +744,7 @@ const acceptCollaborationInvite = async (notification) => {
         </View>
         
         <View style={styles.textContainer}>
-          <Text style={[styles.notificationText, !item.read && styles.unreadText]}>
-            {formatNotificationText(item)}
-          </Text>
+          {renderNotificationText(item)}
           <Text style={styles.timeText}>
             {formatTimeAgo(item.createdAt)}
           </Text>
@@ -698,19 +753,59 @@ const acceptCollaborationInvite = async (notification) => {
         
         {!item.read && <View style={styles.unreadDot} />}
       </View>
-      
-      <TouchableOpacity
-        style={styles.deleteButton}
-        onPress={(e) => {
-          e.stopPropagation();
-          deleteNotification(item.id);
-        }}
-        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-      >
-        <Ionicons name="close" size={20} color="#666" />
-      </TouchableOpacity>
     </TouchableOpacity>
   );
+
+const renderNotificationText = (notification) => {
+  // Handle both notification structures
+  const senderName = 
+    notification.data?.senderUsername || 
+    notification.fromUsername || 
+    null;
+
+  const senderUid = 
+    notification.senderUid || 
+    notification.fromUserId || 
+    null;
+
+  const fullText = formatNotificationText(notification);
+
+  // No sender name or uid to navigate to — plain text
+  if (!senderName || !senderUid) {
+    return (
+      <Text style={[styles.notificationText, !notification.read && styles.unreadText]}>
+        {fullText}
+      </Text>
+    );
+  }
+
+  // Split around the sender's username to make it tappable
+  const parts = fullText.split(senderName);
+
+  if (parts.length < 2) {
+    return (
+      <Text style={[styles.notificationText, !notification.read && styles.unreadText]}>
+        {fullText}
+      </Text>
+    );
+  }
+
+  return (
+    <Text style={[styles.notificationText, !notification.read && styles.unreadText]}>
+      {parts[0]}
+      <Text
+        style={styles.usernameLink}
+        onPress={(e) => {
+          e.stopPropagation();
+          navigation.navigate('Profile', { screen: 'Profile', params: { userId: senderUid } });
+        }}
+      >
+        {senderName}
+      </Text>
+      {parts.slice(1).join(senderName)}
+    </Text>
+  );
+};
 
   if (loading) {
     return (
@@ -729,22 +824,8 @@ const acceptCollaborationInvite = async (notification) => {
         <TouchableOpacity style={styles.backbutton} onPress={()=>handlegoback()}>
           <Text style={styles.backbuttontext}>←</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>Notifications</Text>
-        <View style={styles.headerActions}>
-          {followRequests.length > 0 && (
-            <TouchableOpacity 
-              onPress={() => setShowRequests(true)} 
-              style={styles.requestsButton}
-            >
-              <Ionicons name="people" size={20} color="#007AFF" />
-              <View style={styles.requestsBadge}>
-                <Text style={styles.requestsBadgeText}>
-                  {followRequests.length > 99 ? '99+' : followRequests.length}
-                </Text>
-              </View>
-            </TouchableOpacity>
-          )}
-        </View>
+        <Text style={styles.title} numberOfLines={1}>Notifications</Text>
+        <View style={styles.headerSpacer} />
       </View>
       
       <FlatList
@@ -782,9 +863,6 @@ const acceptCollaborationInvite = async (notification) => {
           <View style={styles.modalContent} onStartShouldSetResponder={() => true}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Follow Requests</Text>
-              <TouchableOpacity onPress={() => setShowRequests(false)}>
-                <Ionicons name="close" size={24} color="#666" />
-              </TouchableOpacity>
             </View>
 
             {followRequests.length === 0 ? (
@@ -799,7 +877,9 @@ const acceptCollaborationInvite = async (notification) => {
                 renderItem={({ item: req }) => (
                   <View style={styles.requestItem}>
                     <View style={styles.requestInfo}>
-                      <Text style={styles.requestUsername}>{req.fromUsername || req.from}</Text>
+                      <TouchableOpacity onPress={() => { setShowRequests(false); navigation.navigate('Profile', { screen: 'Profile', params: { userId: req.from } }); }}>
+                        <Text style={[styles.requestUsername, styles.usernameLink]}>{req.fromUsername || req.from}</Text>
+                      </TouchableOpacity>
                       <Text style={styles.requestTime}>
                         {req.createdAt ? new Date(req.createdAt.toDate()).toLocaleDateString() : 'Recently'}
                       </Text>
@@ -827,108 +907,42 @@ const acceptCollaborationInvite = async (notification) => {
         </TouchableOpacity>
       </Modal>
 
-      {/* Collaboration Details Modal */}
-      <Modal
-        visible={showCollaborationDetails}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowCollaborationDetails(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.collaborationModal}>
-            {loadingCollabDetails ? (
-              <ActivityIndicator size="large" color="#007AFF" />
-            ) : selectedCollaboration ? (
-              <ScrollView showsVerticalScrollIndicator={false}>
-                <View style={styles.modalHeader}>
-                  <Text style={styles.modalTitle}>Collaboration Details</Text>
-                  <TouchableOpacity onPress={() => setShowCollaborationDetails(false)}>
-                    <Ionicons name="close" size={24} color="#666" />
-                  </TouchableOpacity>
-                </View>
-
-                <View style={styles.collabDetailsContainer}>
-                  <View style={styles.detailSection}>
-                    <Ionicons name="document-text" size={20} color="#8e44ad" />
-                    <Text style={styles.detailLabel}>Project Title</Text>
-                  </View>
-                  <Text style={styles.detailValue}>{selectedCollaboration.title}</Text>
-
-                  <View style={styles.detailSection}>
-                    <Ionicons name="information-circle" size={20} color="#8e44ad" />
-                    <Text style={styles.detailLabel}>About</Text>
-                  </View>
-                  <Text style={styles.detailValue}>{selectedCollaboration.about}</Text>
-
-                  {selectedCollaboration.tech && (
-                    <>
-                      <View style={styles.detailSection}>
-                        <Ionicons name="code-slash" size={20} color="#8e44ad" />
-                        <Text style={styles.detailLabel}>Technologies</Text>
-                      </View>
-                      <Text style={styles.detailValue}>{selectedCollaboration.tech}</Text>
-                    </>
-                  )}
-
-                  {selectedCollaboration.githubRepo && (
-                    <>
-                      <View style={styles.detailSection}>
-                        <Ionicons name="logo-github" size={20} color="#8e44ad" />
-                        <Text style={styles.detailLabel}>GitHub Repository</Text>
-                      </View>
-                      <Text style={styles.detailValueLink}>{selectedCollaboration.githubRepo}</Text>
-                    </>
-                  )}
-
-                  <View style={styles.detailSection}>
-                    <Ionicons name="person" size={20} color="#8e44ad" />
-                    <Text style={styles.detailLabel}>Creator</Text>
-                  </View>
-                  <Text style={styles.detailValue}>{selectedCollaboration.creatorUsername}</Text>
-
-                  <View style={styles.detailSection}>
-                    <Ionicons name="time" size={20} color="#8e44ad" />
-                    <Text style={styles.detailLabel}>Created</Text>
-                  </View>
-                  <Text style={styles.detailValue}>
-                    {selectedCollaboration.createdAt 
-                      ? new Date(selectedCollaboration.createdAt.toDate()).toLocaleDateString()
-                      : 'Recently'}
-                  </Text>
-                </View>
-
-                <View style={styles.modalActions}>
-                  <TouchableOpacity
-                    style={styles.acceptButtonLarge}
-                    onPress={() => {
-                      const notification = notifications.find(
-                        n => n.data?.projectId === selectedCollaboration.id
-                      );
-                      if (notification) acceptCollaborationInvite(notification);
-                    }}
-                  >
-                    <Ionicons name="checkmark-circle" size={20} color="#fff" />
-                    <Text style={styles.actionButtonTextLarge}>Accept Invitation</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.rejectButtonLarge}
-                    onPress={() => {
-                      const notification = notifications.find(
-                        n => n.data?.projectId === selectedCollaboration.id
-                      );
-                      if (notification) rejectCollaborationInvite(notification);
-                    }}
-                  >
-                    <Ionicons name="close-circle" size={20} color="#fff" />
-                    <Text style={styles.actionButtonTextLarge}>Decline</Text>
-                  </TouchableOpacity>
-                </View>
-              </ScrollView>
-            ) : null}
+      {/* Project Details Modal (for collaboration invite) */}
+      {loadingCollabDetails ? (
+        <Modal visible transparent>
+          <View style={[styles.modalOverlay, { justifyContent: 'center', alignItems: 'center' }]}>
+            <ActivityIndicator size="large" color="#007AFF" />
           </View>
-        </View>
-      </Modal>
+        </Modal>
+      ) : null}
+      <ProjectDetailsModal
+        visible={projectDetailsVisible && !loadingCollabDetails}
+        project={selectedProjectForDetails}
+        onClose={() => {
+          setProjectDetailsVisible(false);
+          setSelectedProjectForDetails(null);
+          setSelectedCollaborationNotification(null);
+        }}
+        isInviteMode={!!selectedCollaborationNotification}
+        onAcceptInvite={selectedCollaborationNotification ? async () => {
+          setAcceptingInvite(true);
+          try {
+            await acceptCollaborationInvite(selectedCollaborationNotification);
+          } finally {
+            setAcceptingInvite(false);
+          }
+        } : undefined}
+        onRejectInvite={selectedCollaborationNotification ? async () => {
+          setRejectingInvite(true);
+          try {
+            await rejectCollaborationInvite(selectedCollaborationNotification);
+          } finally {
+            setRejectingInvite(false);
+          }
+        } : undefined}
+        acceptingInvite={acceptingInvite}
+        rejectingInvite={rejectingInvite}
+      />
     </View>
   );
 };
@@ -962,14 +976,15 @@ const styles = StyleSheet.create({
     paddingTop: getStatusBarHeight()
   },
   title: {
+    flex: 1,
     fontSize: 22,
     fontWeight: 'bold',
     color: 'white',
-    // position:'absolute',
-    // left:'0',
-    // right:'0',
-    // textAlign:'center',
-    marginTop:15,
+    textAlign: 'center',
+    marginTop: 15,
+  },
+  headerSpacer: {
+    width: 40,
   },
   headerActions: {
     flexDirection: 'row',
@@ -1012,25 +1027,21 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   notificationItem: {
-    backgroundColor: '#333',
+    backgroundColor: '#ffffff',
     marginHorizontal: 16,
     marginVertical: 4,
     borderRadius: 12,
     padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-    elevation: 2,
-    borderBottomColor:'white',
-    borderBottomWidth:1
+    shadowColor: '#FF6D1F',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 4,
   },
   unreadNotification: {
-    backgroundColor: '#f0f8ff',
-    borderLeftWidth: 4,
-    borderLeftColor: '#FF6D1F',
+    backgroundColor: '#ffffff',
   },
   notificationContent: {
     flex: 1,
@@ -1056,9 +1067,14 @@ const styles = StyleSheet.create({
   unreadText: {
     fontWeight: '600',
   },
+  usernameLink: {
+    color: '#007AFF',
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
   timeText: {
     fontSize: 12,
-    color: 'white',
+    color: '#666',
     marginTop: 4,
   },
   actionButtons: {

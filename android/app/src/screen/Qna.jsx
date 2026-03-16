@@ -39,6 +39,7 @@ const Qna = () => {
   const selectedQuestionIdFromRoute = route.params?.selectedQuestionId;
   
   const [selectedQuestion, setSelectedQuestion] = useState(null);
+  const [authorProfiles, setAuthorProfiles] = useState({});
 
   const { 
     profile, 
@@ -47,7 +48,8 @@ const Qna = () => {
     currentUser,
     fetchTrendingQuestions,
     cacheImage,
-    getCachedImageUri 
+    getCachedImageUri,
+    refreshQuestions,
   } = useUserData();
 
   const currentUsername = profile?.username;
@@ -130,6 +132,70 @@ const Qna = () => {
     }
   }, [currentUser, fetchTrendingQuestions, formatQuestion, trendingQuestions.length]);
 
+  // Load latest profile avatars/usernames for question authors (batched, low reads)
+  const loadAuthorProfiles = useCallback(
+    async (authorIds, { force } = { force: false }) => {
+      try {
+        const existing = authorProfiles;
+        const uniqueIds = Array.from(
+          new Set(
+            authorIds.filter((id) => {
+              if (!id || typeof id !== 'string') return false;
+              // Skip already-known authors unless this is a forced refresh
+              if (!force && existing[id]) return false;
+              return true;
+            })
+          )
+        );
+        if (uniqueIds.length === 0) return;
+
+        const chunks = [];
+        for (let i = 0; i < uniqueIds.length; i += 10) {
+          chunks.push(uniqueIds.slice(i, i + 10));
+        }
+
+        const results = {};
+
+        for (const chunk of chunks) {
+          const snapshot = await Firestore()
+            .collection('profile')
+            .where(Firestore.FieldPath.documentId(), 'in', chunk)
+            .get();
+
+          snapshot.forEach((doc) => {
+            const data = doc.data() || {};
+            results[doc.id] = {
+              username: data.username || data.displayName || data.name,
+              avatar: data.avatar || data.photoURL || null,
+            };
+            if (data.avatar || data.photoURL) {
+              cacheImage(data.avatar || data.photoURL);
+            }
+          });
+        }
+
+        if (Object.keys(results).length > 0 && isMounted.current) {
+          setAuthorProfiles((prev) => ({ ...prev, ...results }));
+        }
+      } catch (error) {
+        console.error('Error loading author profiles for QnA:', error);
+      }
+    },
+    [authorProfiles, cacheImage]
+  );
+
+  // Whenever the set of questions changes, ensure we have fresh author avatars
+  useEffect(() => {
+    const ids = [
+      ...(followingQuestions || []).map((q) => q.userId || q.authorId),
+      ...trendingQuestions.map((q) => q.userId || q.authorId),
+    ];
+    if (ids.length > 0 && currentUser) {
+      // Background load, only for authors we haven't seen yet
+      loadAuthorProfiles(ids, { force: false });
+    }
+  }, [followingQuestions, trendingQuestions, currentUser, loadAuthorProfiles]);
+
   // Initial load
   useEffect(() => {
     loadTrendingQuestions(false);
@@ -177,9 +243,20 @@ const Qna = () => {
     setRefreshing(true);
     try {
       await Promise.all([
+        // Force fresh questions so avatars and content stay in sync
+        refreshQuestions(true),
         loadTrendingQuestions(false),
         loadPopularTags()
       ]);
+
+      // After questions & trending are refreshed, force-refresh author avatars
+      const ids = [
+        ...(followingQuestions || []).map((q) => q.userId || q.authorId),
+        ...trendingQuestions.map((q) => q.userId || q.authorId),
+      ];
+      if (ids.length > 0 && currentUser) {
+        await loadAuthorProfiles(ids, { force: true });
+      }
     } catch (error) {
       console.error('Error refreshing:', error);
       Alert.alert('Error', 'Failed to refresh. Please try again.');
@@ -188,7 +265,7 @@ const Qna = () => {
         setRefreshing(false);
       }
     }
-  }, [loadTrendingQuestions]);
+  }, [loadTrendingQuestions, loadPopularTags, refreshQuestions, followingQuestions, trendingQuestions, currentUser, loadAuthorProfiles]);
 
   // ============================================
   // OPTIMIZED: Load popular tags via Cloud Function
@@ -357,11 +434,27 @@ const Qna = () => {
             (doc) => {
               if (doc.exists && isMounted.current) {
                 const updated = doc.data();
-                setSelectedQuestion(prev => ({
-                  ...prev,
-                  ...updated,
-                  answers: Array.isArray(updated.answers) ? updated.answers : []
-                }));
+                setSelectedQuestion((prev) => {
+                  const base = {
+                    ...prev,
+                    ...updated,
+                    answers: Array.isArray(updated.answers) ? updated.answers : [],
+                  };
+
+                  const authorId = base.authorId || updated.authorId;
+                  const profileOverride = authorProfiles[authorId] || {};
+
+                  return {
+                    ...base,
+                    username: profileOverride.username || base.username || 'Anonymous',
+                    userImage: getCachedImageUri(
+                      profileOverride.avatar ||
+                        base.userImage ||
+                        base.avatar ||
+                        'https://placehold.co/100'
+                    ),
+                  };
+                });
               }
             },
             (error) => {
@@ -371,7 +464,7 @@ const Qna = () => {
 
         return () => unsubscribe();
       }
-    }, [selectedQuestion?.id])
+    }, [selectedQuestion?.id, authorProfiles, getCachedImageUri])
   );
 
   useEffect(() => {
@@ -403,53 +496,73 @@ const Qna = () => {
       return [];
     }
 
-    return followingQuestions.map(question => ({
-      id: question.id,
-      title: question.title || question.question || 'Untitled Question',
-      content: question.content || question.description || '',
-      username: question.username || 'Anonymous',
-      userImage: getCachedImageUri(question.userImage || question.avatar || 'https://placehold.co/100'),
-      timestamp: toDate(question.createdAt || question.timestamp),
-      answers: (Array.isArray(question.answers) ? question.answers : []).map(ans => ({
-        ...ans,
-        timestamp: toDate(ans.timestamp || ans.createdAt),
-        replies: (Array.isArray(ans.replies) ? ans.replies : []).map(reply => ({
-          ...reply,
-          timestamp: toDate(reply.timestamp)
-        }))
-      })),
-      tags: Array.isArray(question.tags) ? question.tags : [],
-      authorId: question.userId || question.authorId,
-      imageUrl: question.imageUrl ? getCachedImageUri(question.imageUrl) : null,
-      likes: typeof question.likes === 'number' ? question.likes : 0,
-      likedBy: Array.isArray(question.likedBy) ? question.likedBy : []
-    }));
-  }, [followingQuestions, getCachedImageUri]);
+    return followingQuestions.map(question => {
+      const authorId = question.userId || question.authorId;
+      const profileOverride = authorProfiles[authorId] || {};
+
+      return {
+        id: question.id,
+        title: question.title || question.question || 'Untitled Question',
+        content: question.content || question.description || '',
+        username: profileOverride.username || question.username || 'Anonymous',
+        userImage: getCachedImageUri(
+          profileOverride.avatar ||
+            question.userImage ||
+            question.avatar ||
+            'https://placehold.co/100'
+        ),
+        timestamp: toDate(question.createdAt || question.timestamp),
+        answers: (Array.isArray(question.answers) ? question.answers : []).map(ans => ({
+          ...ans,
+          timestamp: toDate(ans.timestamp || ans.createdAt),
+          replies: (Array.isArray(ans.replies) ? ans.replies : []).map(reply => ({
+            ...reply,
+            timestamp: toDate(reply.timestamp)
+          }))
+        })),
+        tags: Array.isArray(question.tags) ? question.tags : [],
+        authorId,
+        imageUrl: question.imageUrl ? getCachedImageUri(question.imageUrl) : null,
+        likes: typeof question.likes === 'number' ? question.likes : 0,
+        likedBy: Array.isArray(question.likedBy) ? question.likedBy : []
+      };
+    });
+  }, [followingQuestions, getCachedImageUri, authorProfiles]);
 
   const filteredQuestions = useMemo(() => {
-    const formattedTrendingQuestions = trendingQuestions.map(question => ({
-      id: question.id,
-      title: question.title || question.question || 'Untitled Question',
-      content: question.content || question.description || '',
-      username: question.username || 'Anonymous',
-      userImage: getCachedImageUri(question.userImage || question.avatar || 'https://placehold.co/100'),
-      timestamp: toDate(question.createdAt || question.timestamp),
-      answers: (Array.isArray(question.answers) ? question.answers : []).map(ans => ({
-        ...ans,
-        timestamp: toDate(ans.timestamp || ans.createdAt),
-        replies: (Array.isArray(ans.replies) ? ans.replies : []).map(reply => ({
-          ...reply,
-          timestamp: toDate(reply.timestamp)
-        }))
-      })),
-      tags: Array.isArray(question.tags) ? question.tags : [],
-      authorId: question.userId || question.authorId,
-      imageUrl: question.imageUrl ? getCachedImageUri(question.imageUrl) : null,
-      likes: typeof question.likes === 'number' ? question.likes : 0,
-      likedBy: Array.isArray(question.likedBy) ? question.likedBy : [],
-      trendingScore: question.trendingScore || 0,
-      isTrending: true
-    }));
+    const formattedTrendingQuestions = trendingQuestions.map(question => {
+      const authorId = question.userId || question.authorId;
+      const profileOverride = authorProfiles[authorId] || {};
+
+      return {
+        id: question.id,
+        title: question.title || question.question || 'Untitled Question',
+        content: question.content || question.description || '',
+        username: profileOverride.username || question.username || 'Anonymous',
+        userImage: getCachedImageUri(
+          profileOverride.avatar ||
+            question.userImage ||
+            question.avatar ||
+            'https://placehold.co/100'
+        ),
+        timestamp: toDate(question.createdAt || question.timestamp),
+        answers: (Array.isArray(question.answers) ? question.answers : []).map(ans => ({
+          ...ans,
+          timestamp: toDate(ans.timestamp || ans.createdAt),
+          replies: (Array.isArray(ans.replies) ? ans.replies : []).map(reply => ({
+            ...reply,
+            timestamp: toDate(reply.timestamp)
+          }))
+        })),
+        tags: Array.isArray(question.tags) ? question.tags : [],
+        authorId,
+        imageUrl: question.imageUrl ? getCachedImageUri(question.imageUrl) : null,
+        likes: typeof question.likes === 'number' ? question.likes : 0,
+        likedBy: Array.isArray(question.likedBy) ? question.likedBy : [],
+        trendingScore: question.trendingScore || 0,
+        isTrending: true
+      };
+    });
 
     const formattedFollowingQuestions = questions
       .filter(q => q.username !== currentUsername)
@@ -473,7 +586,7 @@ const Qna = () => {
       }
       return b.timestamp - a.timestamp;
     });
-  }, [questions, trendingQuestions, currentUsername, getCachedImageUri]);
+  }, [questions, trendingQuestions, currentUsername, getCachedImageUri, authorProfiles]);
 
   const formatDate = (date) => {
     try {
@@ -704,28 +817,37 @@ const Qna = () => {
   });
 
   const formattedSearchResults = useMemo(() => {
-    return searchResults.map(question => ({
-      id: question.id,
-      title: question.title || 'Untitled Question',
-      content: question.content || '',
-      username: question.username || 'Anonymous',
-      userImage: getCachedImageUri(question.userImage || 'https://placehold.co/100'),
-      timestamp: toDate(question.timestamp),
-      answers: (Array.isArray(question.answers) ? question.answers : []).map(ans => ({
-        ...ans,
-        timestamp: toDate(ans.timestamp || ans.createdAt),
-        replies: (Array.isArray(ans.replies) ? ans.replies : []).map(reply => ({
-          ...reply,
-          timestamp: toDate(reply.timestamp)
-        }))
-      })),
-      tags: Array.isArray(question.tags) ? question.tags : [],
-      authorId: question.authorId,
-      imageUrl: question.imageUrl ? getCachedImageUri(question.imageUrl) : null,
-      likes: typeof question.likes === 'number' ? question.likes : 0,
-      likedBy: Array.isArray(question.likedBy) ? question.likedBy : []
-    }));
-  }, [searchResults, getCachedImageUri]);
+    return searchResults.map(question => {
+      const authorId = question.authorId;
+      const profileOverride = authorProfiles[authorId] || {};
+
+      return {
+        id: question.id,
+        title: question.title || 'Untitled Question',
+        content: question.content || '',
+        username: profileOverride.username || question.username || 'Anonymous',
+        userImage: getCachedImageUri(
+          profileOverride.avatar ||
+            question.userImage ||
+            'https://placehold.co/100'
+        ),
+        timestamp: toDate(question.timestamp),
+        answers: (Array.isArray(question.answers) ? question.answers : []).map(ans => ({
+          ...ans,
+          timestamp: toDate(ans.timestamp || ans.createdAt),
+          replies: (Array.isArray(ans.replies) ? ans.replies : []).map(reply => ({
+            ...reply,
+            timestamp: toDate(reply.timestamp)
+          }))
+        })),
+        tags: Array.isArray(question.tags) ? question.tags : [],
+        authorId,
+        imageUrl: question.imageUrl ? getCachedImageUri(question.imageUrl) : null,
+        likes: typeof question.likes === 'number' ? question.likes : 0,
+        likedBy: Array.isArray(question.likedBy) ? question.likedBy : []
+      };
+    });
+  }, [searchResults, getCachedImageUri, authorProfiles]);
 
   // Question List View (inline JSX so the TextInput is not remounted on every keystroke)
   const questionListView = (

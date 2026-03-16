@@ -314,6 +314,7 @@ const ConversationsScreen = () => {
               initialLikeCount={item.likeCount || item.likes || 0}
               initialLikedBy={item.likedBy || []}
               createdAt={item.createdAt}
+              userId={item.userId}  
             />
           </React.Fragment>
         );

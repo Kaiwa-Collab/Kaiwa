@@ -2,7 +2,7 @@
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const admin = require('firebase-admin');
-const { onDocumentWritten } = require('firebase-functions/v2/firestore');
+const { onDocumentWritten, onDocumentDeleted } = require('firebase-functions/v2/firestore');
 
 if (!admin.apps.length) {
   admin.initializeApp();
@@ -188,6 +188,11 @@ async function buildUserConversations(userId) {
       const chatId = chatDoc.id;
       const chatType = chatData.type || 'direct';
 
+      // Skip chats this user has deleted (delete-for-me)
+      if (chatData.deletedFor && chatData.deletedFor[userId]) {
+        continue;
+      }
+
       const effectiveLast = await getEffectiveLastMessage(
         admin.firestore(), chatId, chatData.lastMessage, userId
       );
@@ -303,19 +308,13 @@ exports.updateUserConversationsOnChatChange = onDocumentWritten('chats/{chatId}'
     const chatData = event.data?.after?.data();
     const chatId = event.params.chatId;
 
-    // Chat was deleted
     if (!chatData) {
       console.log(`[updateUserConversations] Chat ${chatId} was deleted`);
       return;
     }
 
     const participants = chatData.participants || [];
-    if (participants.length === 0) {
-      console.log(`[updateUserConversations] No participants found in chat ${chatId}`);
-      return;
-    }
-
-    console.log(`[updateUserConversations] Chat ${chatId} changed, updating ${participants.length} participants`);
+    if (participants.length === 0) return;
 
     for (const userId of participants) {
       try {
@@ -325,9 +324,7 @@ exports.updateUserConversationsOnChatChange = onDocumentWritten('chats/{chatId}'
 
         const aggDoc = await aggRef.get();
 
-        // No cache yet — do a full build
         if (!aggDoc.exists) {
-          console.log(`[updateUserConversations] No cache for ${userId}, doing full build`);
           const result = await buildUserConversations(userId);
           await aggRef.set({
             conversations: result.conversations,
@@ -340,12 +337,22 @@ exports.updateUserConversationsOnChatChange = onDocumentWritten('chats/{chatId}'
         const existing = aggDoc.data();
         let conversations = existing.conversations || [];
 
+        // ✅ Check if this user has deleted this chat — if so, NEVER re-add it
+        const deletedForUser = chatData.deletedFor && chatData.deletedFor[userId];
+        if (deletedForUser) {
+          // Remove it if it somehow exists, then skip
+          conversations = conversations.filter(c => c.conversationId !== chatId);
+          await aggRef.update({
+            conversations,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+          });
+          continue;
+        }
+
         const index = conversations.findIndex(c => c.conversationId === chatId);
 
         if (index !== -1) {
-          // Conversation exists — patch only the fields that changed
-          console.log(`[updateUserConversations] Patching existing conversation ${chatId} for user ${userId}`);
-          
+          // Patch existing conversation
           const lastMessageText = chatData.lastMessage?.text || conversations[index].lastMessage || '';
           const lastMessageTime = chatData.updatedAt || conversations[index].lastMessageTime;
 
@@ -354,21 +361,22 @@ exports.updateUserConversationsOnChatChange = onDocumentWritten('chats/{chatId}'
             lastMessage: lastMessageText,
             lastMessageTime: lastMessageTime,
           };
-
         } else {
-          // New conversation for this user — build just this one
-          console.log(`[updateUserConversations] New conversation ${chatId} for user ${userId}, fetching details`);
+          // New conversation — build and add
           const result = await buildUserConversations(userId);
           const newConv = result.conversations.find(c => c.conversationId === chatId);
           if (newConv) {
-            conversations.push(newConv);
+            // ✅ Double check it's not deleted before adding
+            const isDeleted = chatData.deletedFor && chatData.deletedFor[userId];
+            if (!isDeleted) {
+              conversations.push(newConv);
+            }
           } else {
-            console.log(`[updateUserConversations] Could not find new conversation ${chatId} in build result`);
             continue;
           }
         }
 
-        // Always deduplicate before writing
+        // Deduplicate
         const seen = new Set();
         conversations = conversations.filter(conv => {
           if (seen.has(conv.conversationId)) return false;
@@ -376,13 +384,13 @@ exports.updateUserConversationsOnChatChange = onDocumentWritten('chats/{chatId}'
           return true;
         });
 
-        // Re-sort by latest message time
+        // Re-sort
         conversations.sort((a, b) => {
-          const aTime = a.lastMessageTime?.toDate 
-            ? a.lastMessageTime.toDate() 
+          const aTime = a.lastMessageTime?.toDate
+            ? a.lastMessageTime.toDate()
             : new Date(a.lastMessageTime || 0);
-          const bTime = b.lastMessageTime?.toDate 
-            ? b.lastMessageTime.toDate() 
+          const bTime = b.lastMessageTime?.toDate
+            ? b.lastMessageTime.toDate()
             : new Date(b.lastMessageTime || 0);
           return bTime - aTime;
         });
@@ -392,8 +400,6 @@ exports.updateUserConversationsOnChatChange = onDocumentWritten('chats/{chatId}'
           lastUpdated: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        console.log(`[updateUserConversations] Successfully updated cache for user ${userId}`);
-
       } catch (error) {
         console.error(`[updateUserConversations] Error updating user ${userId}:`, error);
       }
@@ -401,6 +407,28 @@ exports.updateUserConversationsOnChatChange = onDocumentWritten('chats/{chatId}'
 
   } catch (error) {
     console.error('[updateUserConversationsOnChatChange] Error:', error);
+  }
+});
+
+// ==================== REMOVE CONVERSATION WHEN USER DELETES CHAT (userChats sub doc deleted) ====================
+exports.removeConversationOnUserChatDelete = onDocumentDeleted('userChats/{userId}/chats/{chatId}', async (event) => {
+  try {
+    const { userId, chatId } = event.params;
+    if (!userId || !chatId) return;
+
+    const aggRef = admin.firestore().collection('aggregated').doc(`conversations_${userId}`);
+    const aggDoc = await aggRef.get();
+    if (!aggDoc.exists) return;
+
+    const data = aggDoc.data();
+    const conversations = (data.conversations || []).filter(c => c.conversationId !== chatId);
+    await aggRef.update({
+      conversations,
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    });
+    console.log(`[removeConversationOnUserChatDelete] Removed chat ${chatId} from conversations_${userId}`);
+  } catch (error) {
+    console.error('[removeConversationOnUserChatDelete] Error:', error);
   }
 });
 
