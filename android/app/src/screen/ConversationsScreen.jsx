@@ -100,9 +100,41 @@ const hydrateAvatars = async (posts) => {
   }
 };
 
+const getPostTimestamp = (post) => {
+  const value = post?.createdAt || post?.timestamp || null;
+  if (!value) return 0;
+  if (value?.toDate) return value.toDate().getTime();
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
+const toIsoIfValid = (ms) => (ms && ms > 0 ? new Date(ms).toISOString() : null);
+
+const mergePostsByRecency = (existing = [], incoming = []) => {
+  const map = new Map();
+
+  [...existing, ...incoming].forEach((post, idx) => {
+    const key = post?.id || post?.postId || `fallback_${idx}`;
+    const previous = map.get(key);
+    if (!previous) {
+      map.set(key, post);
+      return;
+    }
+
+    // Prefer the fresher object while preserving fields from both copies.
+    const next = getPostTimestamp(post) >= getPostTimestamp(previous)
+      ? { ...previous, ...post }
+      : { ...post, ...previous };
+    map.set(key, next);
+  });
+
+  return [...map.values()].sort((a, b) => getPostTimestamp(b) - getPostTimestamp(a));
+};
+
 const ConversationsScreen = () => {
-  const { loading, followingPosts, getCachedImageUri, currentUser, followingIds } = useUserData();
+  const { loading, followingPosts, getCachedImageUri, currentUser, followingIds, refreshPostsFromFollowing } = useUserData();
   const [popularPosts, setPopularPosts] = useState([]);
+  const [mergedFollowingPosts, setMergedFollowingPosts] = useState([]);
   const [loadingPopular, setLoadingPopular] = useState(false);
   const [combinedPosts, setCombinedPosts] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -131,7 +163,7 @@ const ConversationsScreen = () => {
 
       if (shouldTriggerUpdate) {
         try {
-          const updateFunction = functions().httpsCallable('triggerPopularPostsUpdate');
+          const updateFunction = functions().httpsCallable('triggerPopularPostsUpdateCallable');
           await updateFunction();
           await new Promise(resolve => setTimeout(resolve, 1000));
         } catch (funcError) {
@@ -143,12 +175,33 @@ const ConversationsScreen = () => {
     }
   }, []);
 
-  const loadPopularPosts = useCallback(async () => {
+  const loadPopularPosts = useCallback(async (options = {}) => {
+    const { sinceTimestamp = null, forceRecompute = false } = options;
     try {
       setLoadingPopular(true);
       setError(null);
 
+      if (forceRecompute) {
+        try {
+          const updateFunction = functions().httpsCallable('triggerPopularPostsUpdateCallable');
+          await updateFunction();
+        } catch (recomputeError) {
+          // Keep refresh usable even when recompute endpoint is unavailable.
+          console.log('[ConversationsScreen] Recompute popular posts failed, using latest available data:', recomputeError.message);
+        }
+      }
+
       let posts = await retryWithBackoff(async () => {
+        if (sinceTimestamp) {
+          const getPopularPostsSince = functions().httpsCallable('getPopularPostsSince');
+          const response = await getPopularPostsSince({
+            sinceTimestamp,
+            excludeUserIds: followingIds || [],
+            limit: 50,
+          });
+          return Array.isArray(response?.data?.items) ? response.data.items : [];
+        }
+
         const aggregatedDoc = await firestore().collection('aggregated').doc('popularPosts').get();
 
         if (aggregatedDoc.exists) {
@@ -160,10 +213,15 @@ const ConversationsScreen = () => {
               userAvatar: post.userAvatar || post.avatarUrl || null,
               likeCount: post.likeCount || post.likes || 0,
               likes: post.likes || post.likeCount || 0,
+              commentCount: post.commentCount || 0,
             }));
 
             if (followingIds && followingIds.length > 0) {
               normalized = normalized.filter(post => !followingIds.includes(post.userId));
+            }
+            if (sinceTimestamp) {
+              const sinceMs = new Date(sinceTimestamp).getTime();
+              normalized = normalized.filter(post => getPostTimestamp(post) > sinceMs);
             }
             return normalized;
           }
@@ -195,13 +253,18 @@ const ConversationsScreen = () => {
         if (followingIds && followingIds.length > 0) {
           fallbackPosts = fallbackPosts.filter(post => !followingIds.includes(post.userId));
         }
+        if (sinceTimestamp) {
+          const sinceMs = new Date(sinceTimestamp).getTime();
+          fallbackPosts = fallbackPosts.filter(post => getPostTimestamp(post) > sinceMs);
+        }
         return fallbackPosts;
       }, 3, 1000);
 
-      // Hydrate with fresh avatars from profile docs (1 read per unique user, not per post)
-      posts = await hydrateAvatars(posts);
+      // For incremental callable path avatars are already hydrated in aggregated data;
+      // for Firestore fallback path keep hydration as safety.
+      posts = sinceTimestamp ? posts : await hydrateAvatars(posts);
 
-      setPopularPosts(posts);
+      setPopularPosts(prev => mergePostsByRecency(prev, posts));
       setLoadingPopular(false);
     } catch (error) {
       console.error('[ConversationsScreen] Error loading popular posts:', error);
@@ -221,12 +284,22 @@ const ConversationsScreen = () => {
     if (!loading && currentUser) loadPopularPosts();
   }, [loading, followingIds?.length, currentUser?.uid, loadPopularPosts]);
 
-  // Combine following posts and popular posts, hydrating following posts avatars too
   useEffect(() => {
-    const following = followingPosts || [];
-    const popular = popularPosts || [];
+    setMergedFollowingPosts(prev => mergePostsByRecency(prev, followingPosts || []));
+  }, [followingPosts]);
 
-    if (following.length === 0 && popular.length === 0) {
+  // Combine following posts and popular posts, hydrating following posts avatars too
+  // If a followed user's post appears in popular payload, force it into following section.
+  useEffect(() => {
+    const popular = popularPosts || [];
+    const followingFromPopular = (followingIds && followingIds.length > 0)
+      ? popular.filter(p => followingIds.includes(p.userId))
+      : [];
+    const following = mergePostsByRecency(mergedFollowingPosts || [], followingFromPopular);
+    const followingIdsSet = new Set(following.map(p => p.id || p.postId));
+    const nonFollowingPopular = popular.filter(p => !followingIdsSet.has(p.id || p.postId));
+
+    if (following.length === 0 && nonFollowingPopular.length === 0) {
       setCombinedPosts([]);
       return;
     }
@@ -241,24 +314,34 @@ const ConversationsScreen = () => {
 
       if (hydratedFollowing.length > 0) {
         const seenIds = new Set(hydratedFollowing.map(p => p.id || p.postId));
-        const uniquePopular = popular.filter(p => !seenIds.has(p.id || p.postId));
+        const uniquePopular = nonFollowingPopular.filter(p => !seenIds.has(p.id || p.postId));
         setCombinedPosts([...hydratedFollowing, ...uniquePopular]);
       } else {
-        setCombinedPosts(popular);
+        setCombinedPosts(nonFollowingPopular);
       }
 
-      if (initialLoad && (following.length > 0 || popular.length > 0)) {
+      if (initialLoad && (following.length > 0 || nonFollowingPopular.length > 0)) {
         setInitialLoad(false);
       }
     };
 
     buildCombined();
-  }, [followingPosts, popularPosts, initialLoad]);
+  }, [mergedFollowingPosts, popularPosts, initialLoad, followingIds]);
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await loadPopularPosts();
-    setRefreshing(false);
+    try {
+      const latestFollowingTs = toIsoIfValid(Math.max(...(mergedFollowingPosts || []).map(getPostTimestamp), 0));
+      const latestPopularTs = toIsoIfValid(Math.max(...(popularPosts || []).map(getPostTimestamp), 0));
+      await Promise.all([
+        loadPopularPosts({ sinceTimestamp: latestPopularTs, forceRecompute: true }),
+        refreshPostsFromFollowing
+          ? refreshPostsFromFollowing({ sinceTimestamp: latestFollowingTs })
+          : Promise.resolve(),
+      ]);
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   if (initialLoad || loading || loadingPopular) {
@@ -314,7 +397,8 @@ const ConversationsScreen = () => {
               initialLikeCount={item.likeCount || item.likes || 0}
               initialLikedBy={item.likedBy || []}
               createdAt={item.createdAt}
-              userId={item.userId}  
+              userId={item.userId}
+               commentCount={item.commentCount || 0}    
             />
           </React.Fragment>
         );

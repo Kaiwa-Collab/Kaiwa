@@ -101,9 +101,15 @@ const navigation = useNavigation();
         const userSnap = await userRef.get();
         const userExists = userSnap.exists;
         const userData = userSnap.data();
-        const hasUsername = userData && userData.username;
+        
+        const profileSnap = await firestore().collection('profile').doc(user.uid).get();
+        const profileData = profileSnap.data();
 
-        if (!userExists) {
+        const hasUsername =
+          !!(userData && (userData.username || userData.usernameLower)) ||
+          !!(profileData && (profileData.username || profileData.usernameLower || profileData.displayName));
+
+        if (!userExists && !hasUsername) {
           // First-time Google sign-in: create doc and send to username setup
           try {
             await userRef.set({

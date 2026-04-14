@@ -38,6 +38,7 @@ import {useUserData} from '../users';
 import RNFS from 'react-native-fs';
 import { CameraRoll } from '@react-native-camera-roll/camera-roll';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import chatSQLiteService from '../../service/chatSQLiteService';
 
 
 
@@ -87,6 +88,44 @@ const localMediaPaths = useRef({});
 const [localMessageStatus, setLocalMessageStatus] = useState({}); // { [messageId]: 'sent'|'delivered'|'seen' }
   const isScreenFocused = useIsFocused();
   const oldestMessageIdRef = useRef(null);
+  const chatLoadMetricsRef = useRef({
+    chatOpenCount: 0,
+    sqliteHydrateCount: 0,
+    networkSyncCount: 0,
+    networkSkippedCount: 0,
+  });
+  // const firestoreUnsubscribeRef = useRef(null);
+
+const sanitizeMessage = useCallback((msg) => {
+  let createdAt = null;
+  try {
+    const raw = msg.createdAt;
+    if (raw == null) {
+      createdAt = null;
+    } else if (typeof raw === 'string') {
+      createdAt = raw;
+    } else if (typeof raw === 'number') {
+      createdAt = new Date(raw).toISOString();
+    } else if (raw._seconds != null) {
+      createdAt = new Date(raw._seconds * 1000).toISOString();
+    } else if (typeof raw.toDate === 'function') {
+      createdAt = raw.toDate().toISOString();
+    }
+  } catch (_) {
+    createdAt = null;
+  }
+  return {
+    ...msg,
+    createdAt,
+    text:        msg.text        != null ? String(msg.text)        : null,
+    senderId:    msg.senderId    != null ? String(msg.senderId)    : '',
+    messageType: msg.messageType != null ? String(msg.messageType) : 'text',
+    id:          msg.id          != null ? String(msg.id)          : '',
+    status:      msg.status      != null ? String(msg.status)      : 'sent',
+    imageUrl:    msg.imageUrl    != null ? String(msg.imageUrl)    : null,
+    videoUrl:    msg.videoUrl    != null ? String(msg.videoUrl)    : null,
+  };
+}, []);
 
   // Keep ref in sync whenever state updates:
 useEffect(() => {
@@ -136,42 +175,71 @@ useEffect(() => {
   loadPersistedPaths();
 }, []); // runs once on mount
 
-  const updateLocalStatus = useCallback((messageIds, status) => {
-    if (!messageIds || messageIds.length === 0) return;
-    if (status !== 'delivered' && status !== 'seen') return;
+  // const updateLocalStatus = useCallback((messageIds, status) => {
+  //   if (!messageIds || messageIds.length === 0) return;
+  //   if (status !== 'delivered' && status !== 'seen') return;
 
-    setLocalMessageStatus(prev => {
-      const next = { ...prev };
-      messageIds.forEach(id => {
-        // Never downgrade from 'seen'
-        if (prev[id] === 'seen') {
-          return;
-        }
-        next[id] = status;
-      });
-      return next;
-    });
-  }, []);
+  //   setLocalMessageStatus(prev => {
+  //     const next = { ...prev };
+  //     messageIds.forEach(id => {
+  //       // Never downgrade from 'seen'
+  //       if (prev[id] === 'seen') {
+  //         return;
+  //       }
+  //       next[id] = status;
+  //     });
+  //     return next;
+  //   });
+  // }, []);
 
   // ─── WebSocket connection status (connection is initiated by AuthWrapper on app open) ───
-  useEffect(() => {
-    setIsConnected(wsChatService.isConnected);
+ // REMOVE the entire setInterval block. Replace with:
+// useEffect(() => {
+//   setIsConnected(wsChatService.isConnected);
 
-    const connectionCheckInterval = setInterval(() => {
-      const currentStatus = wsChatService.isConnected;
-      if (currentStatus !== isConnected) {
-        setIsConnected(currentStatus);
-      }
-    }, 2000);
+//   const unsub = wsChatService.onConnectionChange(() => {
+//     setIsConnected(wsChatService.isConnected);
+//   });
 
-    return () => {
-      clearInterval(connectionCheckInterval);
-      if (actualChatId && !actualChatId.startsWith('temp_') && !actualChatId.startsWith('request_')) {
-        wsChatService.leaveChat(actualChatId);
-        console.log('👋 Left chat room:', actualChatId);
-      }
-    };
-  }, [actualChatId]);
+//   return () => {
+//     unsub();
+//     if (actualChatId && !actualChatId.startsWith('temp_') && !actualChatId.startsWith('request_')) {
+//       wsChatService.leaveChat(actualChatId);
+//     }
+//   };
+// }, [actualChatId]); // ← actualChatId only, not isConnected
+
+// ─── WebSocket connection status ────────────────────────────────────────────
+// ─── WebSocket connection status ─────────────────────────────────────────────
+useEffect(() => {
+  setIsConnected(wsChatService.isConnected && wsChatService.isAuthenticated);
+
+  const handleConnectionChange = (data = {}) => {  // ← add parameter
+    const connected = wsChatService.isConnected && wsChatService.isAuthenticated;
+    setIsConnected(connected);
+
+    if (connected && actualChatId &&
+      !actualChatId.startsWith('temp_') &&
+      !actualChatId.startsWith('request_')
+    ) {
+      wsChatService.joinChat(actualChatId);
+    }
+  };
+
+  wsChatService.addListener('connection_status', handleConnectionChange);
+  wsChatService.addListener('reconnected', handleConnectionChange);
+
+  return () => {
+    wsChatService.removeListener('connection_status', handleConnectionChange);
+    wsChatService.removeListener('reconnected', handleConnectionChange);
+    if (actualChatId &&
+      !actualChatId.startsWith('temp_') &&
+      !actualChatId.startsWith('request_')
+    ) {
+      wsChatService.leaveChat(actualChatId);
+    }
+  };
+}, [actualChatId]);// only re-runs if chat changes, not on every isConnected flip
 
   useEffect(() => {
     setActualChatId(chatId);
@@ -291,8 +359,8 @@ useEffect(() => {
   }, [actualChatId, chatData, userId, currentUserUid, isRequestMode]);
 
   // ─── Load message history ───────────────────────────────────────────────────
-  // FIX: Added proper auth waiting + up to 4 retries with increasing backoff
- useEffect(() => {
+  // Hydrate from SQLite first for instant UI, then fetch fresh in background only when needed.
+useEffect(() => {
   const invalidChatId = !actualChatId ||
     actualChatId === 'default' ||
     actualChatId.startsWith('temp_') ||
@@ -302,285 +370,359 @@ useEffect(() => {
     return;
   }
 
+  // ADD this block right after setIsLoadingMessages(false) inside the SQLite hydrate success block:
+// if (localMessages.length > 0) {
+//   // Check if wsChatService received any messages while we were away
+//   // that SQLite may not have yet (race condition window)
+//   const cachedMessages = wsChatService.getCachedMessages(actualChatId);
+//   if (cachedMessages && cachedMessages.length > 0) {
+//     const sqliteIds = new Set(localMessages.map(m => m.id));
+//     const missed = cachedMessages.filter(m => m.id && !sqliteIds.has(m.id));
+//     if (missed.length > 0) {
+//       console.log(`🔄 Found ${missed.length} messages in memory cache not in SQLite`);
+//       setMessages(prev => {
+//         const prevIds = new Set(prev.map(m => m.id));
+//         const newOnes = missed.filter(m => !prevIds.has(m.id)).map(sanitizeMessage);
+//         if (newOnes.length === 0) return prev;
+//         return [...newOnes, ...prev].sort(
+//           (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+//         );
+//       });
+//     }
+//   }
+// }
+
   let cancelled = false;
 
+  const toUiMessageFromSQLite = (msg) => {
+    const resolvedType = msg.mediaType || 'text';
+    return sanitizeMessage ( {
+      id: msg.id,
+      tempId: msg.tempId,
+      senderId: msg.senderId,
+      text: msg.text,
+      messageType: resolvedType,
+      imageUrl: resolvedType === 'image' ? msg.mediaUrl : null,
+      videoUrl: resolvedType === 'video' ? msg.mediaUrl : null,
+      createdAt: typeof msg.createdAt === 'number' ? new Date(msg.createdAt).toISOString() : msg.createdAt,
+      readBy: {},
+      deliveredTo: {},
+      status: msg.status || 'sent',
+    });
+  };
+
   const loadMessages = async (retryCount = 0) => {
-  const CACHE_TTL = 5 * 60 * 1000;
-  const cached = wsChatService.getCachedMessages(actualChatId);
-  const cacheAge = wsChatService.getCacheAge(actualChatId);
-
-  // ── Cache-skip: if cache is fresh + WS is live ──
-  if (cached?.length > 0 && cacheAge < CACHE_TTL && wsChatService.isConnected) {
-    if (cancelled) return;
-
-    const filtered = cached.filter(msg => {
-      const deletedFor = msg.deletedFor || {};
-      return !deletedFor[currentUserUid];
-    });
-
-    // ✅ Fix 3: merge instead of replace to preserve readBy/deliveredTo
-    setMessages(prev => {
-      if (prev.length === 0) return filtered;
-      const prevMap = new Map(prev.map(m => [m.id, m]));
-      return filtered.map(msg => {
-        const existing = prevMap.get(msg.id);
-        if (!existing) return msg;
-        return {
-          ...msg,
-          readBy: { ...msg.readBy, ...existing.readBy },
-          deliveredTo: { ...msg.deliveredTo, ...existing.deliveredTo },
-        };
-      });
-    });
-
-    const oldest = filtered[filtered.length - 1];
-    setOldestMessageId(oldest?.id ?? null);
-    setHasMoreMessages(filtered.length === PAGE_SIZE);
-    setIsLoadingMessages(false);
-    console.log(`✅ Served ${filtered.length} messages from cache`);
-    return;
-  }
-
-  // ── Cache stale/empty — show stale while fetching fresh ──
-  if (cached?.length > 0) {
-    const filteredCached = cached.filter(msg => {
-      const deletedFor = msg.deletedFor || {};
-      return !deletedFor[currentUserUid];
-    });
-    setMessages(filteredCached);
-    setIsLoadingMessages(false);
-  } else {
-    setIsLoadingMessages(true);
-  }
-
-  try {
-    // ✅ Fix 2: removed waitForAuth() — fetchMessageHistory handles auth internally
-    console.log(`📥 Fetching fresh messages (attempt ${retryCount + 1})...`);
-    const response = await wsChatService.fetchMessageHistory(actualChatId, PAGE_SIZE);
-    if (cancelled) return;
-
-    const historyMessages = response.messages || [];
-    const filteredMessages = historyMessages.filter(msg => {
-      const deletedFor = msg.deletedFor || {};
-      return !deletedFor[currentUserUid];
-    });
-
-    // ✅ Fix 3: merge instead of replace
-    setMessages(prev => {
-      if (prev.length === 0) return filteredMessages;
-      const prevMap = new Map(prev.map(m => [m.id, m]));
-      return filteredMessages.map(msg => {
-        const existing = prevMap.get(msg.id);
-        if (!existing) return msg;
-        return {
-          ...msg,
-          readBy: { ...msg.readBy, ...existing.readBy },
-          deliveredTo: { ...msg.deliveredTo, ...existing.deliveredTo },
-        };
-      });
-    });
-
-    const oldest = filteredMessages[filteredMessages.length - 1];
-    setOldestMessageId(oldest?.id ?? null);
-    setHasMoreMessages(response.hasMore ?? filteredMessages.length === PAGE_SIZE);
-
-    console.log(`✅ Messages fetched: ${filteredMessages.length}`);
-
-    // Mark undelivered as delivered
-    if (wsChatService.isConnected) {
-      const undeliveredIds = filteredMessages
-        .filter(msg => {
-          if (msg.senderId === currentUserUid) return false;
-          return !msg.deliveredTo?.[currentUserUid];
-        })
-        .map(msg => msg.id);
-
-      if (undeliveredIds.length > 0) {
-        wsChatService.markMessagesAsDelivered(actualChatId, undeliveredIds);
-      }
+    if (retryCount === 0) {
+      chatLoadMetricsRef.current.chatOpenCount += 1;
     }
-  } catch (error) {
-    if (cancelled) return;
+    const CACHE_TTL = 5 * 60 * 1000;
+    const cacheAge = wsChatService.getCacheAge(actualChatId);
 
-    if (retryCount < 3) {
-      const delay = (retryCount + 1) * 1500;
-      console.warn(`⚠️ Retry ${retryCount + 1} in ${delay}ms: ${error.message}`);
-      await new Promise(r => setTimeout(r, delay));
+    // 1) Instant hydrate from SQLite
+    let localMessages = [];
+    try {
+      localMessages = await chatSQLiteService.getMessages(actualChatId, PAGE_SIZE);
       if (cancelled) return;
-      return loadMessages(retryCount + 1);
+
+      if (localMessages.length > 0) {
+        chatLoadMetricsRef.current.sqliteHydrateCount += 1;
+        const hydrated = localMessages
+          .map(toUiMessageFromSQLite)
+          .filter(msg => {
+            const deletedFor = msg.deletedFor || {};
+            return !deletedFor[currentUserUid];
+          })
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+       setMessages(hydrated);
+        const oldestLocal = hydrated[hydrated.length - 1];
+        setOldestMessageId(oldestLocal?.id ?? null);
+        setHasMoreMessages(hydrated.length === PAGE_SIZE);
+        setIsLoadingMessages(false);
+
+        // Merge any messages the WebSocket received while we were on another screen
+        // that SQLite may not have written yet (narrow race window)
+       const cachedMessages = wsChatService.getCachedMessages(actualChatId);
+if (cachedMessages && cachedMessages.length > 0) {
+  const sqliteIds = new Set(hydrated.map(m => m.id));
+  const missed = cachedMessages.filter(m => m.id && !sqliteIds.has(m.id));
+  if (missed.length > 0) {
+    console.log(`🔄 Cache has ${missed.length} messages not yet in SQLite — merging`);
+    const mergedAll = [
+      ...missed.map(sanitizeMessage),
+      ...hydrated,
+    ].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    setMessages(mergedAll);
+    // Update oldest ID for pagination to reflect the true oldest message
+    setOldestMessageId(mergedAll[mergedAll.length - 1]?.id ?? null);
+  }
+}
+      } else {
+        setIsLoadingMessages(true);
+      }
+    } catch (sqliteError) {
+      console.warn('SQLite hydrate failed, falling back to network:', sqliteError?.message);
+      setIsLoadingMessages(true);
     }
 
-    console.error('Error loading messages after all retries:', error);
-    Alert.alert('Loading Error', 'Failed to load messages. Please try again.', [{ text: 'OK' }]);
-  } finally {
-    if (!cancelled) setIsLoadingMessages(false);
-  }
-};
-if (wsChatService.isConnected) {
-  try { wsChatService.joinChat(actualChatId); } catch (_) {}
+    // 2) Decide if fresh fetch is needed (background sync)
+    const cacheIsVeryFresh = Number.isFinite(cacheAge) && cacheAge < 30 * 1000;
+    const hasLocalData = localMessages.length > 0;
+    // Only skip if SQLite already has the latest message the socket received
+    const lastReceivedId = wsChatService.getLastReceivedMessageId(actualChatId);
+    const sqliteHasLatest = !lastReceivedId ||
+       localMessages.some(m => m.id === lastReceivedId);
+    const shouldSkipFetch = hasLocalData && cacheIsVeryFresh && sqliteHasLatest;
+
+if (shouldSkipFetch) {
+  chatLoadMetricsRef.current.networkSkippedCount += 1;
+  console.log('✅ Cache very fresh, skipping network fetch');
+  return;
 }
 
-loadMessages(0);
-return () => { cancelled = true; };
+    try {
+      if (retryCount === 0) {
+        chatLoadMetricsRef.current.networkSyncCount += 1;
+      }
+      console.log(`📥 Background sync messages (attempt ${retryCount + 1})...`);
+      const response = await wsChatService.fetchMessageHistory(actualChatId, PAGE_SIZE);
+      if (cancelled) return;
+
+      const historyMessages = response.messages || [];
+      const filteredMessages = historyMessages.filter(msg => {
+        const deletedFor = msg.deletedFor || {};
+        return !deletedFor[currentUserUid];
+      }).map(sanitizeMessage);
+
+      // Persist server history in SQLite for next screen open.
+      await chatSQLiteService.bulkUpsertServerMessages(
+        filteredMessages.map(msg => ({
+          id: msg.id,
+          chatId: actualChatId,
+          senderId: msg.senderId,
+          text: msg.text || null,
+          mediaUrl: msg.imageUrl || msg.videoUrl || msg.mediaUrl || null,
+          mediaType: msg.messageType || (msg.imageUrl ? 'image' : msg.videoUrl ? 'video' : null),
+          status: msg.status || 'sent',
+          createdAt: msg.createdAt,
+          serverTs: msg.createdAt,
+          isMine: msg.senderId === currentUserUid,
+        }))
+      );
+
+      // Merge server snapshot with current in-memory state to preserve local read/delivery updates.
+      setMessages(prev => {
+        if (prev.length === 0) return filteredMessages;
+        const prevMap = new Map(prev.map(m => [m.id, m]));
+        return filteredMessages.map(msg => {
+          const existing = prevMap.get(msg.id);
+          if (!existing) return msg;
+          return {
+            ...msg,
+            status: existing.status === 'failed' || existing.status === 'sending' ? existing.status : (msg.status || 'sent'),
+            readBy: { ...msg.readBy, ...existing.readBy },
+            deliveredTo: { ...msg.deliveredTo, ...existing.deliveredTo },
+          };
+        });
+      });
+
+      const oldest = filteredMessages[filteredMessages.length - 1];
+      setOldestMessageId(oldest?.id ?? null);
+      setHasMoreMessages(response.hasMore ?? filteredMessages.length === PAGE_SIZE);
+
+      console.log(`✅ Background sync complete: ${filteredMessages.length} messages`);
+      if (__DEV__) {
+        const m = chatLoadMetricsRef.current;
+        console.log(
+          `[ChatMetrics] opens=${m.chatOpenCount} sqliteHydrates=${m.sqliteHydrateCount} networkSyncs=${m.networkSyncCount} networkSkips=${m.networkSkippedCount}`
+        );
+      }
+
+      if (wsChatService.isConnected) {
+        const undeliveredIds = filteredMessages
+          .filter(msg => {
+            if (msg.senderId === currentUserUid) return false;
+            return !msg.deliveredTo?.[currentUserUid];
+          })
+          .map(msg => msg.id);
+
+        if (undeliveredIds.length > 0) {
+          wsChatService.markMessagesAsDelivered(actualChatId, undeliveredIds);
+        }
+      }
+    } catch (error) {
+      if (cancelled) return;
+
+      if (retryCount < 2) {
+        const delay = (retryCount + 1) * 1500;
+        console.warn(`⚠️ Background sync retry ${retryCount + 1} in ${delay}ms: ${error.message}`);
+        await new Promise(r => setTimeout(r, delay));
+        if (cancelled) return;
+        return loadMessages(retryCount + 1);
+      }
+
+      // Keep UI on SQLite data; don't block user with error popup for background sync failures.
+      console.warn('Background message sync failed:', error?.message);
+    } finally {
+      if (!cancelled) setIsLoadingMessages(false);
+    }
+  };
+
+  loadMessages(0);
+  return () => { cancelled = true; };
 }, [actualChatId, currentUserUid]);
 
   // ─── WebSocket: Join chat + event listeners ─────────────────────────────────
-  useEffect(() => {
-    if (!actualChatId || actualChatId.startsWith('temp_') || actualChatId.startsWith('request_')) {
-      return;
-    }
-
-    if (!isConnected) {
-      return;
-    }
-
-    try {
-      wsChatService.joinChat(actualChatId);
-    } catch (e) {
-      console.warn('Could not join chat room:', e);
-    }
-
-    const handleNewMessage = (message) => {
-      console.log('New message received:', message);
-
-      const deletedFor = message.deletedFor || {};
-      if (deletedFor[currentUserUid]) return;
-
-      setMessages(prev => {
-        const exists = prev.find(m => m.id === message.id);
-        if (exists) return prev;
-        return [message, ...prev];
-      });
-      wsChatService.addMessageToCache(actualChatId, message);
-
-      setTimeout(() => {
-        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
-      }, 100);
-
-      wsChatService.markMessagesAsDelivered(actualChatId, [message.id]);
-    };
-
-   const handleMessageConfirmed = (data) => {
-  setMessages(prev => {
-    const withoutTemps = prev.filter(msg => !msg.id.startsWith('temp_'));
-    const existingMsg = withoutTemps.find(m => m.id === data.message.id);
-    const mergedMessage = {
-      ...data.message,
-      // Preserve read/delivery status already tracked locally
-      readBy: { ...data.message.readBy, ...(existingMsg?.readBy || {}) },
-      deliveredTo: { ...data.message.deliveredTo, ...(existingMsg?.deliveredTo || {}) },
-    };
-    const existingIndex = withoutTemps.findIndex(m => m.id === data.message.id);
-    if (existingIndex !== -1) {
-      return withoutTemps.map((m, i) => i === existingIndex ? mergedMessage : m);
-    }
-    return [mergedMessage, ...withoutTemps];
-  });
-  wsChatService.addMessageToCache(actualChatId, data.message);
-};
-
-    const handleMessageError = (data) => {
-      console.error('Message error:', data);
-      setMessages(prev => prev.filter(msg => msg.id !== data.tempId));
-      Alert.alert('Error', data.error || 'Failed to send message');
-    };
-
-    const handleMessagesDelivered = (data) => {
-      if (!data?.messageIds || data.messageIds.length === 0) return;
-
-      setMessages(prev => {
-        const updated = prev.map(msg => {
-          if (data.messageIds.includes(msg.id)) {
-            const nextMsg = {
-              ...msg,
-              deliveredTo: {
-                ...msg.deliveredTo,
-                [data.userId]: new Date().toISOString()
-              }
-            };
-            // Keep cache in sync so future history loads don't regress status
-            wsChatService.updateMessageInCache(actualChatId, nextMsg);
-            return nextMsg;
-          }
-          return msg;
-        });
-
-        return updated;
-      });
-
-      // Locally mark these messages as at least 'delivered' (won't downgrade from seen)
-      updateLocalStatus(data.messageIds, 'delivered');
-    };
-
-    const handleMessagesRead = (data) => {
-      if (!data?.messageIds || data.messageIds.length === 0) return;
-
-      setMessages(prev => {
-        const updated = prev.map(msg => {
-          if (data.messageIds.includes(msg.id)) {
-            const nextMsg = {
-              ...msg,
-              readBy: {
-                ...msg.readBy,
-                [data.userId]: new Date().toISOString()
-              }
-            };
-            // Keep cache in sync so future history loads don't regress status
-            wsChatService.updateMessageInCache(actualChatId, nextMsg);
-            return nextMsg;
-          }
-          return msg;
-        });
-
-        return updated;
-      });
-
-      // Locally mark these messages as 'seen' so ticks don't flicker back
-      updateLocalStatus(data.messageIds, 'seen');
-    };
-
-    const handleUserTyping = (data) => {
-      if (data.chatId === actualChatId && data.userId !== currentUserUid) {
-        setOtherUserTyping(data.isTyping);
-      }
-    };
-
-    const handleMessageUpdated = (data) => {
-  if (data.chatId === actualChatId && data.message) {
-    setMessages(prev =>
-      prev.map(msg => {
-        if (msg.id !== data.message.id) return msg;
-        return {
-          ...data.message,
-          // Preserve read/delivery status — server update may not have latest
-          readBy: { ...data.message.readBy, ...msg.readBy },
-          deliveredTo: { ...data.message.deliveredTo, ...msg.deliveredTo },
-        };
-      })
-    );
-    wsChatService.updateMessageInCache(actualChatId, data.message);
+ useEffect(() => {
+  if (!actualChatId || actualChatId.startsWith('temp_') || actualChatId.startsWith('request_')) {
+    return;
   }
-};
 
-    wsChatService.addListener('new_message', handleNewMessage);
-    wsChatService.addListener('message_confirmed', handleMessageConfirmed);
-    wsChatService.addListener('message_error', handleMessageError);
-    wsChatService.addListener('messages_delivered', handleMessagesDelivered);
-    wsChatService.addListener('messages_read', handleMessagesRead);
-    wsChatService.addListener('user_typing', handleUserTyping);
-    wsChatService.addListener('message_updated', handleMessageUpdated);
+ console.log('👂 [Listeners] Registering listeners for:', actualChatId);
 
-    return () => {
-      wsChatService.removeListener('new_message', handleNewMessage);
-      wsChatService.removeListener('message_confirmed', handleMessageConfirmed);
-      wsChatService.removeListener('message_error', handleMessageError);
-      wsChatService.removeListener('messages_delivered', handleMessagesDelivered);
-      wsChatService.removeListener('messages_read', handleMessagesRead);
-      wsChatService.removeListener('user_typing', handleUserTyping);
-      wsChatService.removeListener('message_updated', handleMessageUpdated);
-      wsChatService.leaveChat(actualChatId);
-    };
-  }, [actualChatId, currentUserUid, isConnected, updateLocalStatus]);
+  try {
+    wsChatService.joinChat(actualChatId);
+  } catch (e) {
+    console.warn('Could not join chat room:', e);
+  }
+
+  const handleNewMessage = (message) => {
+        console.log('📨 [Message] Received:', message.id, '|', message.text?.slice(0, 20)); // ← ADD
+
+    const deletedFor = message.deletedFor || {};
+    if (deletedFor[currentUserUid]) return;
+
+    setMessages(prev => {
+      const exists = prev.find(m => m.id === message.id);
+      if (exists) return prev;
+      return [message, ...prev];
+    });
+    wsChatService.addMessageToCache(actualChatId, message);
+
+    setTimeout(() => {
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    }, 100);
+
+    wsChatService.markMessagesAsDelivered(actualChatId, [message.id]);
+  };
+
+  const handleMessageConfirmed = (data) => {
+    setMessages(prev => {
+      const withoutTemps = prev.filter(msg => !msg.id.startsWith('temp_'));
+      const existingMsg = withoutTemps.find(m => m.id === data.message.id);
+      const mergedMessage = {
+        ...data.message,
+        readBy: { ...data.message.readBy, ...(existingMsg?.readBy || {}) },
+        deliveredTo: { ...data.message.deliveredTo, ...(existingMsg?.deliveredTo || {}) },
+      };
+      const existingIndex = withoutTemps.findIndex(m => m.id === data.message.id);
+      if (existingIndex !== -1) {
+        return withoutTemps.map((m, i) => i === existingIndex ? mergedMessage : m);
+      }
+      return [mergedMessage, ...withoutTemps];
+    });
+    wsChatService.addMessageToCache(actualChatId, data.message);
+  };
+
+  const handleMessageError = async (data) => {
+    console.error('Message error:', data);
+    await chatSQLiteService.markMessageFailed(data.tempId).catch(() => {});
+    setMessages(prev =>
+      prev.map(m => (m.id === data.tempId || m.tempId === data.tempId)
+        ? { ...m, status: 'failed' }
+        : m
+      )
+    );
+  };
+
+  // const handleMessagesDelivered = (data) => {
+  //   if (!data?.messageIds || data.messageIds.length === 0) return;
+
+  //   setMessages(prev => {
+  //     return prev.map(msg => {
+  //       if (data.messageIds.includes(msg.id)) {
+  //         const nextMsg = {
+  //           ...msg,
+  //           deliveredTo: {
+  //             ...msg.deliveredTo,
+  //             [data.userId]: new Date().toISOString()
+  //           }
+  //         };
+  //         wsChatService.updateMessageInCache(actualChatId, nextMsg);
+  //         return nextMsg;
+  //       }
+  //       return msg;
+  //     });
+  //   });
+
+  //   updateLocalStatus(data.messageIds, 'delivered');
+  // };
+
+  // const handleMessagesRead = (data) => {
+  //   if (!data?.messageIds || data.messageIds.length === 0) return;
+
+  //   setMessages(prev => {
+  //     return prev.map(msg => {
+  //       if (data.messageIds.includes(msg.id)) {
+  //         const nextMsg = {
+  //           ...msg,
+  //           readBy: {
+  //             ...msg.readBy,
+  //             [data.userId]: new Date().toISOString()
+  //           }
+  //         };
+  //         wsChatService.updateMessageInCache(actualChatId, nextMsg);
+  //         return nextMsg;
+  //       }
+  //       return msg;
+  //     });
+  //   });
+
+  //   updateLocalStatus(data.messageIds, 'seen');
+  // };
+
+  const handleUserTyping = (data) => {
+    if (data.chatId === actualChatId && data.userId !== currentUserUid) {
+      setOtherUserTyping(data.isTyping);
+    }
+  };
+
+  const handleMessageUpdated = (data) => {
+    if (data.chatId === actualChatId && data.message) {
+      setMessages(prev =>
+        prev.map(msg => {
+          if (msg.id !== data.message.id) return msg;
+          return {
+            ...data.message,
+            readBy: { ...data.message.readBy, ...msg.readBy },
+            deliveredTo: { ...data.message.deliveredTo, ...msg.deliveredTo },
+          };
+        })
+      );
+      wsChatService.updateMessageInCache(actualChatId, data.message);
+    }
+  };
+
+  wsChatService.addListener('new_message', handleNewMessage);
+  wsChatService.addListener('message_confirmed', handleMessageConfirmed);
+  wsChatService.addListener('message_error', handleMessageError);
+  // wsChatService.addListener('messages_delivered', handleMessagesDelivered);
+  // wsChatService.addListener('messages_read', handleMessagesRead);
+  wsChatService.addListener('user_typing', handleUserTyping);
+  wsChatService.addListener('message_updated', handleMessageUpdated);
+
+  return () => {
+    console.log('🧹 [Listeners] Cleaning up for:', actualChatId);
+    wsChatService.removeListener('new_message', handleNewMessage);
+    wsChatService.removeListener('message_confirmed', handleMessageConfirmed);
+    wsChatService.removeListener('message_error', handleMessageError);
+    // wsChatService.removeListener('messages_delivered', handleMessagesDelivered);
+    // wsChatService.removeListener('messages_read', handleMessagesRead);
+    wsChatService.removeListener('user_typing', handleUserTyping);
+    wsChatService.removeListener('message_updated', handleMessageUpdated);
+    // ✅ leaveChat removed — now handled in the connection useEffect above
+  };
+}, [actualChatId, currentUserUid]);
 
   // ─── Mark messages as read when screen focused ──────────────────────────────
   const markUnreadAsRead = useCallback(() => {
@@ -629,82 +771,78 @@ return () => { cancelled = true; };
   }, [isScreenFocused, messages, markUnreadAsRead]);
 
   // ─── Firestore fallback listener when WebSocket is not connected ─────────────
-  useEffect(() => {
-    const invalidChatId =
-      !actualChatId ||
-      actualChatId === 'default' ||
-      actualChatId.startsWith('temp_') ||
-      actualChatId.startsWith('request_');
+// ─── Firestore fallback listener ─────────────────────────────────────────────
+// useEffect(() => {
+//   const invalidChatId =
+//     !actualChatId ||
+//     actualChatId === 'default' ||
+//     actualChatId.startsWith('temp_') ||
+//     actualChatId.startsWith('request_');
 
-    // Only attach Firestore listener for real chats and ONLY when socket is not connected.
-    if (invalidChatId || isConnected) {
-      return;
-    }
+//   if (invalidChatId) return;
 
-    try {
-      const messagesRef = firestore()
-        .collection('chats')
-        .doc(actualChatId)
-        .collection('messages')
-        .orderBy('createdAt', 'desc')
-        .limit(PAGE_SIZE);
+//   // Wait 2 seconds before attaching Firestore listener
+//   // This gives WebSocket time to authenticate on initial mount
+//   // so we don't attach the listener unnecessarily on every chat open
+//   const attachDelay = setTimeout(() => {
+//     if (wsChatService.isConnected && wsChatService.isAuthenticated) {
+//       console.log('✅ WebSocket connected after delay check — skipping Firestore fallback');
+//       return;
+//     }
 
-      const unsubscribe = messagesRef.onSnapshot(
-        (snapshot) => {
-          const liveMessages = snapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data(),
-          }));
+//     console.log('📡 WebSocket offline after delay — attaching Firestore fallback');
 
-          const filtered = liveMessages.filter(msg => {
-            const deletedFor = msg.deletedFor || {};
-            return !deletedFor[currentUserUid];
-          });
+//     const messagesRef = firestore()
+//       .collection('chats')
+//       .doc(actualChatId)
+//       .collection('messages')
+//       .orderBy('createdAt', 'desc')
+//       .limit(30);
 
-          if (filtered.length === 0) {
-            return;
-          }
+//     const unsubscribe = messagesRef.onSnapshot(
+//       (snapshot) => {
+//         const filtered = snapshot.docs
+//           .map(doc => ({ id: doc.id, ...doc.data() }))
+//           .filter(msg => !(msg.deletedFor || {})[currentUserUid]);
 
-          // Inside the onSnapshot callback, replace the setMessages call:
+//         if (filtered.length === 0) return;
 
-setMessages(prev => {
-  if (prev.length === 0) {
-    filtered.forEach(m => wsChatService.addMessageToCache(actualChatId, m));
-    return filtered;
-  }
+//         setMessages(prev => {
+//           if (prev.length === 0) {
+//             filtered.forEach(m => wsChatService.addMessageToCache(actualChatId, m));
+//             return filtered;
+//           }
+//           const prevMap = new Map(prev.map(m => [m.id, m]));
+//           const merged = filtered.map(m => {
+//             const existing = prevMap.get(m.id);
+//             if (!existing) return m;
+//             return {
+//               ...m,
+//               readBy: { ...m.readBy, ...existing.readBy },
+//               deliveredTo: { ...m.deliveredTo, ...existing.deliveredTo },
+//             };
+//           });
+//           const mergedIds = new Set(merged.map(m => m.id));
+//           const result = [...merged, ...prev.filter(m => !mergedIds.has(m.id) && m.id.startsWith('temp_'))];
+//           result.forEach(m => wsChatService.addMessageToCache(actualChatId, m));
+//           return result;
+//         });
+//       },
+//       (error) => console.error('Firestore listener error:', error)
+//     );
 
-  const prevMap = new Map(prev.map(m => [m.id, m]));
-  
-  // ✅ FIX: preserve WS-updated readBy/deliveredTo when Firestore catches up
-  const merged = filtered.map(m => {
-    const existing = prevMap.get(m.id);
-    if (!existing) return m;
-    return {
-      ...m,
-      readBy: { ...m.readBy, ...existing.readBy },
-      deliveredTo: { ...m.deliveredTo, ...existing.deliveredTo },
-    };
-  });
+//     // Store unsubscribe so we can clean it up
+//     firestoreUnsubscribeRef.current = unsubscribe;
+//   }, 2000); // 2 second delay
 
-  // Also keep any messages not in Firestore snapshot (e.g. optimistic temp ones)
-  const mergedIds = new Set(merged.map(m => m.id));
-  const extras = prev.filter(m => !mergedIds.has(m.id));
-
-  const result = [...merged, ...extras.filter(m => m.id.startsWith('temp_'))];
-  result.forEach(m => wsChatService.addMessageToCache(actualChatId, m));
-  return result;
-});
-        },
-        (error) => {
-          console.error('Firestore messages listener error:', error);
-        }
-      );
-
-      return () => unsubscribe();
-    } catch (error) {
-      console.error('Failed to attach Firestore listener for chat messages:', error);
-    }
-  }, [actualChatId, currentUserUid, isConnected]);
+//   return () => {
+//     clearTimeout(attachDelay);
+//     if (firestoreUnsubscribeRef.current) {
+//       firestoreUnsubscribeRef.current();
+//       firestoreUnsubscribeRef.current = null;
+//     }
+//   };
+// }, [actualChatId, currentUserUid, isConnected]);
 
   // ─── Set header ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -805,36 +943,48 @@ setMessages(prev => {
       return;
     }
 
-    const tempId = `temp_${Date.now()}_${Math.random()}`;
-    const optimisticMessage = {
-      id: tempId,
-      senderId: currentUserUid,
-      text: text,
-      messageType: 'text',
-      createdAt: new Date().toISOString(),
-      readBy: { [currentUserUid]: new Date().toISOString() },
-      deliveredTo: {},
-      edited: false,
-      status: 'sending',
-    };
-
-    setMessages(prevMessages => [optimisticMessage, ...prevMessages]);
-    setInput('');
-
-    setTimeout(() => {
-      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
-    }, 50);
-
     try {
-      const result = await wsChatService.sendMessage(actualChatId, currentUserUid, text);
-      console.log('Message sent successfully:', result);
+      // Step 1: SQLite optimistic insert happens inside wsChatService first
+      // Step 2: UI renders immediately using the optimisticMessage it returns.
+      const { optimisticMessage, ackPromise } = await wsChatService.sendMessage(
+        actualChatId,
+        currentUserUid,
+        text
+      );
+
+      setMessages(prevMessages => [optimisticMessage, ...prevMessages]);
+      setInput('');
+
+      setTimeout(() => {
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+      }, 50);
+
+       await chatSQLiteService.debugDumpMessages(actualChatId);
+      ackPromise.catch((error) => {
+  const msg = (error?.message || '').toLowerCase();
+
+  // Not real failures — message stays with clock icon
+  if (msg.includes('timeout') || msg.includes('offline') || msg.includes('queued')) {
+    return;
+  }
+
+  // Real server rejection — show retry icon
+  console.error('Message send failed:', error.message);
+  setMessages(prev =>
+    prev.map(m => m.id === optimisticMessage.id
+      ? { ...m, status: 'failed' }
+      : m
+    )
+  );
+});
     } catch (error) {
       console.error('Error sending message:', error);
-      setMessages(prevMessages => prevMessages.filter(msg => msg.id !== tempId));
       setInput(text);
       Alert.alert('Error', 'Failed to send message. Please try again.');
     }
   };
+
+  
 
   // ─── Send message request ───────────────────────────────────────────────────
   const sendMessageRequest = async () => {
@@ -911,13 +1061,33 @@ setMessages(prev => {
             type === 'video' ? 'video' : 'image'
           );
 
-          await wsChatService.sendMessage(
+          const { optimisticMessage, ackPromise } = await wsChatService.sendMessage(
             actualChatId,
             currentUserUid,
             type === 'video' ? '📹 Video' : '📷 Photo',
             mediaUrl,
             type === 'video' ? 'video' : 'image'
           );
+
+          setMessages(prevMessages => [optimisticMessage, ...prevMessages]);
+
+         ackPromise.catch((error) => {
+  const msg = (error?.message || '').toLowerCase();
+
+  // Not real failures — message stays with clock icon
+  if (msg.includes('timeout') || msg.includes('offline') || msg.includes('queued')) {
+    return;
+  }
+
+  // Real server rejection — show retry icon
+  console.error('Message send failed:', error.message);
+  setMessages(prev =>
+    prev.map(m => m.id === optimisticMessage.id
+      ? { ...m, status: 'failed' }
+      : m
+    )
+  );
+});
 
           setUploading(false);
           setUploadProgress(0);
@@ -968,13 +1138,24 @@ setMessages(prev => {
 
           const mediaUrl = await uploadMediaToStorage(asset.uri, 'image');
 
-          await wsChatService.sendMessage(
+          const { optimisticMessage, ackPromise } = await wsChatService.sendMessage(
             actualChatId,
             currentUserUid,
             '📷 Photo',
             mediaUrl,
             'image'
           );
+
+          setMessages(prevMessages => [optimisticMessage, ...prevMessages]);
+
+          ackPromise.catch((error) => {
+  const msg = (error?.message || '').toLowerCase();
+  if (msg.includes('timeout') || msg.includes('offline') || msg.includes('queued')) return;
+  console.error('Photo send failed:', error.message);
+  setMessages(prev =>
+    prev.map(m => m.id === optimisticMessage.id ? { ...m, status: 'failed' } : m)
+  );
+});
 
           setUploading(false);
           setUploadProgress(0);
@@ -1085,68 +1266,121 @@ setMessages(prev => {
     }
   }, [isFetchingMore, hasMoreMessages, actualChatId, currentUserUid]);
 
-  // ─── Message status ─────────────────────────────────────────────────────────
-  const getMessageStatus = (message) => {
+  // ─── Message status for direct chats ─────────────────────────────────────────────────────────
+//   const getMessageStatus = (message) => {
+//   if (message.senderId !== currentUserUid || message.isRequestMessage) return null;
+
+//   const override = localMessageStatus[message.id];
+//   if (override) return override;
+
+//   if (message.status === 'sending') return 'sending';
+//   if (message.status === 'failed') return 'failed';
+
+//   // ✅ FIX: If chat metadata hasn't loaded yet, show clock instead of single tick
+//   const targetRecipientId = recipientId || userId;
+//   const participantsLoaded = chatData?.participants?.length > 0 || targetRecipientId;
+  
+//   if (!participantsLoaded) {
+//     // Don't show a tick at all until we know who the recipient is
+//     if (message.id && !message.id.startsWith('temp_')) return 'sent';
+//     return 'sending';
+//   }
+
+//   // resolve actual recipient
+//   const resolvedRecipient = targetRecipientId || 
+//     chatData?.participants?.find(id => id !== currentUserUid);
+
+//   if (!resolvedRecipient) {
+//     return message.id && !message.id.startsWith('temp_') ? 'sent' : 'sending';
+//   }
+
+//   const readBy = message.readBy || {};
+//   const deliveredTo = message.deliveredTo || {};
+
+//   if (readBy[resolvedRecipient]) return 'seen';
+//   if (deliveredTo[resolvedRecipient]) return 'delivered';
+//   if (message.id && !message.id.startsWith('temp_')) return 'sent';
+//   return 'sending';
+// };
+
+
+// for group chats
+const getMessageStatus = (message) => {
   if (message.senderId !== currentUserUid || message.isRequestMessage) return null;
 
-  const override = localMessageStatus[message.id];
-  if (override) return override;
-
   if (message.status === 'sending') return 'sending';
+  if (message.status === 'failed') return 'failed';
+  if (message.id?.startsWith('temp_')) return 'sending';
 
-  // ✅ FIX: If chat metadata hasn't loaded yet, show clock instead of single tick
-  const targetRecipientId = recipientId || userId;
-  const participantsLoaded = chatData?.participants?.length > 0 || targetRecipientId;
-  
-  if (!participantsLoaded) {
-    // Don't show a tick at all until we know who the recipient is
-    if (message.id && !message.id.startsWith('temp_')) return 'sent';
-    return 'sending';
-  }
-
-  // resolve actual recipient
-  const resolvedRecipient = targetRecipientId || 
-    chatData?.participants?.find(id => id !== currentUserUid);
-
-  if (!resolvedRecipient) {
-    return message.id && !message.id.startsWith('temp_') ? 'sent' : 'sending';
-  }
-
-  const readBy = message.readBy || {};
-  const deliveredTo = message.deliveredTo || {};
-
-  if (readBy[resolvedRecipient]) return 'seen';
-  if (deliveredTo[resolvedRecipient]) return 'delivered';
-  if (message.id && !message.id.startsWith('temp_')) return 'sent';
-  return 'sending';
+  // For both direct and group — just show sent once server confirms
+  return 'sent';
 };
 
-  const renderTicks = (status) => {
-    if (!status) return null;
+// for group chats tick render
+const renderTicks = (status, item) => {
+  if (!status) return null;
 
-    const tickColor = 'rgba(0, 0, 0, 0.7)';
-    const tickseenColor = 'rgba(201, 241, 23, 0.91)';
-    const tickdeliveredColor = 'rgba(0, 0, 0, 0.7)';
+  if (status === 'failed') {
+    return (
+      <TouchableOpacity onPress={() => item && retryFailedMessage(item)}>
+        <Icon name="alert-circle-outline" size={14} color="#FF3B30" style={styles.tickIcon} />
+      </TouchableOpacity>
+    );
+  }
+  if (status === 'sending') {
+    return <Icon name="time-outline" size={14} color="rgba(255,255,255,0.5)" style={styles.tickIcon} />;
+  }
+  // sent
+  return <Icon name="checkmark-outline" size={14} color="rgba(255,255,255,0.7)" style={styles.tickIcon} />;
+};
 
-    try {
-      if (status === 'sending') {
-        return <Icon name="time-outline" size={14} color="rgba(0, 0, 0, 0.5)" style={styles.tickIcon} />;
-      } else if (status === 'seen') {
-        return <Icon name="checkmark-done" size={14} color={tickseenColor} style={styles.tickIcon} />;
-      } else if (status === 'delivered') {
-        return <Icon name="checkmark-done-outline" size={14} color={tickdeliveredColor} style={styles.tickIcon} />;
-      } else {
-        return <Icon name="checkmark-outline" size={14} color={tickColor} style={styles.tickIcon} />;
-      }
-    } catch (error) {
-      console.error('Error rendering ticks:', error);
-      return (
-        <Text style={styles.tickText}>
-          {status === 'seen' ? '✓✓' : status === 'delivered' ? '✓✓' : '✓'}
-        </Text>
-      );
-    }
+
+// for directchats
+//   const renderTicks = (status) => {
+//     if (!status) return null;
+
+//     const tickColor = 'rgba(0, 0, 0, 0.7)';
+//     const tickseenColor = 'rgba(201, 241, 23, 0.91)';
+//     const tickdeliveredColor = 'rgba(0, 0, 0, 0.7)';
+
+//  try {
+//     // ← ADD THIS
+//     if (status === 'failed') {
+//       return (
+//         <TouchableOpacity onPress={() => item && retryFailedMessage(item)}>
+//           <Icon name="alert-circle-outline" size={14} color="#FF3B30" style={styles.tickIcon} />
+//         </TouchableOpacity>
+//       );
+//     }
+
+    
+//       if (status === 'sending') {
+//         return <Icon name="time-outline" size={14} color="rgba(0, 0, 0, 0.5)" style={styles.tickIcon} />;
+//       } else if (status === 'seen') {
+//         return <Icon name="checkmark-done" size={14} color={tickseenColor} style={styles.tickIcon} />;
+//       } else if (status === 'delivered') {
+//         return <Icon name="checkmark-done-outline" size={14} color={tickdeliveredColor} style={styles.tickIcon} />;
+//       } else {
+//         return <Icon name="checkmark-outline" size={14} color={tickColor} style={styles.tickIcon} />;
+//       }
+//     } catch (error) {
+//       console.error('Error rendering ticks:', error);
+//       return (
+//         <Text style={styles.tickText}>
+//           {status === 'seen' ? '✓✓' : status === 'delivered' ? '✓✓' : '✓'}
+//         </Text>
+//       );
+//     }
+//   };
+
+const getSenderInfo = (senderId) => {
+  if (!senderId || senderId === currentUserUid) return null;
+  const info = chatData?.participantsInfo?.[senderId];
+  return {
+    name: info?.displayName || info?.name || info?.username || 'Unknown',
+    avatar: info?.avatar || null,
   };
+}
 
   // ─── Delete message ─────────────────────────────────────────────────────────
   const handleLongPressMessage = (item) => {
@@ -1162,6 +1396,29 @@ setMessages(prev => {
       ]
     );
   };
+
+const retryFailedMessage = useCallback(async (item) => {
+  if (item.status !== 'failed') return;
+
+  setMessages(prev =>
+    prev.map(m => m.tempId === item.tempId ? { ...m, status: 'sending' } : m)
+  );
+
+  try {
+    const { ackPromise } = await wsChatService.sendMessage(
+      actualChatId, currentUserUid, item.text
+    );
+    ackPromise.catch(() => {
+      setMessages(prev =>
+        prev.map(m => m.tempId === item.tempId ? { ...m, status: 'failed' } : m)
+      );
+    });
+  } catch (error) {
+    setMessages(prev =>
+      prev.map(m => m.tempId === item.tempId ? { ...m, status: 'failed' } : m)
+    );
+  }
+}, [actualChatId, currentUserUid]);
 
   const deleteMessageForEveryone = async (item) => {
     const deletedPlaceholder = {
@@ -1256,6 +1513,8 @@ setMessages(prev => {
     }
   };
 
+
+  
 const downloadMedia = async (item) => {
    if (item.senderId === currentUserUid) return;
   const messageId = item.id;
@@ -1326,6 +1585,8 @@ const downloadMedia = async (item) => {
   }
 };
 
+
+
   // ─── Render message item ────────────────────────────────────────────────────
   const renderItem = ({ item }) => {
   // ── System / GitHub messages (unchanged) ──────────────────────────────────
@@ -1359,6 +1620,8 @@ const downloadMedia = async (item) => {
   // ── Download state for this message ───────────────────────────────────────
   const dlState   = downloadStates[item.id] || 'idle';
   const localPath = localMediaPaths.current[item.id];
+  const isGroup = chatData?.type === 'group';
+const senderInfo = (!isUserMessage && isGroup) ? getSenderInfo(item.senderId) : null;
 
   // Use local file URI if downloaded, otherwise stream from Firebase
   const getDisplayUri = (remoteUrl, messageId) => {
@@ -1368,17 +1631,32 @@ const downloadMedia = async (item) => {
 };
 
   return (
-    <TouchableOpacity
-      activeOpacity={0.9}
-      onLongPress={() => handleLongPressMessage(item)}
-      style={[
-        styles.messageContainer,
-        isUserMessage ? styles.userMessage : styles.botMessage,
-        item.isRequestMessage && styles.requestMessage,
-        item.messageType === 'text' ? styles.textMessage : styles.mediaMessage,
-        isDeleted && styles.deletedMessage,
-      ]}
-    >
+     <View style={{ alignSelf: isUserMessage ? 'flex-end' : 'flex-start', marginVertical: 6, maxWidth: '80%' }}>
+
+    {!!senderInfo && (
+      <Text style={styles.senderName}>{senderInfo.name}</Text>
+    )}
+
+    <View style={{ flexDirection: 'row', alignItems: 'flex-end' }}>
+
+      {!!senderInfo && (
+        senderInfo.avatar
+          ? <Image source={{ uri: getCachedImageUri(senderInfo.avatar) }} style={styles.senderAvatar} />
+          : <EmptydP size={28} initials={senderInfo.name?.[0] || '?'} />
+      )}
+
+      <TouchableOpacity
+        activeOpacity={0.9}
+        onLongPress={() => handleLongPressMessage(item)}
+        style={[
+          styles.messageContainer,
+          isUserMessage ? styles.userMessage : styles.botMessage,
+          item.isRequestMessage && styles.requestMessage,
+          item.messageType === 'text' ? styles.textMessage : styles.mediaMessage,
+          isDeleted && styles.deletedMessage,
+          !!senderInfo && { marginLeft: 6 },
+        ]}
+      >
       {isDeleted ? (
         // ── Deleted message ────────────────────────────────────────────────
         <View style={styles.deletedMessageContent}>
@@ -1482,9 +1760,11 @@ const downloadMedia = async (item) => {
             ? new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : ''}
         </Text>
-        {isUserMessage && !isDeleted && messageStatus && renderTicks(messageStatus)}
+        {isUserMessage && !isDeleted && messageStatus && renderTicks(messageStatus,item)}
       </View>
     </TouchableOpacity>
+     </View>
+  </View>
   );
 };
 
@@ -1613,12 +1893,12 @@ const downloadMedia = async (item) => {
           <TouchableOpacity
             onPress={() => setShowMediaPicker(true)}
             style={styles.attachButton}
-            disabled={showAcceptReject || uploading || !isConnected}
+            disabled={showAcceptReject || uploading }
           >
             <Icon
               name="attach-outline"
               size={24}
-              color={showAcceptReject || uploading || !isConnected ? "#666" : "#FF6D1F"}
+              color={showAcceptReject || uploading  ? "#666" : "#FF6D1F"}
             />
           </TouchableOpacity>
           <TextInput
@@ -1633,7 +1913,7 @@ const downloadMedia = async (item) => {
             placeholderTextColor="#aaa"
             multiline
             maxLength={500}
-            editable={!showAcceptReject && isConnected}
+            editable={!showAcceptReject }
             onFocus={() => {
               setTimeout(() => {
                 if (!showAcceptReject) {
@@ -1646,9 +1926,9 @@ const downloadMedia = async (item) => {
             onPress={sendMessage}
             style={[
               styles.sendButton,
-              { opacity: input.trim() && !showAcceptReject && !uploading && isConnected ? 1 : 0.5 }
+              { opacity: input.trim() && !showAcceptReject && !uploading   ? 1 : 0.5 }
             ]}
-            disabled={!input.trim() || showAcceptReject || uploading || !isConnected}
+            disabled={!input.trim() || showAcceptReject || uploading  }
           >
             <Text style={styles.sendButtonText}>
               {isRequestMode && actualChatId.startsWith('temp_request_') ? 'Send Request' : 'Send'}
@@ -1711,7 +1991,8 @@ const styles = StyleSheet.create({
     marginVertical: 6,
     padding: 10,
     borderRadius: 16,
-    maxWidth: '80%',
+    // maxWidth: '80%',
+    alignSelf:'stretch',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
@@ -1779,7 +2060,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingTop: 6,
     paddingBottom: 20,
-    paddingRight: 65,
+    paddingRight: 20,
+    minWidth: 80, 
   },
   messageFooter: {
     position: 'absolute',
@@ -2059,6 +2341,19 @@ paginationLoaderText: {
     position: 'absolute',
     bottom: 3,
     left: 2,
-  }
+  },
+  senderName: {
+  color: '#FF6D1F',        // use your brand orange, or pick per-user with a hash fn
+  fontSize: 11,
+  fontWeight: '600',
+  marginBottom: 2,
+  marginLeft: 34,          // align with bubble (past the avatar width)
+},
+senderAvatar: {
+  width: 28,
+  height: 28,
+  borderRadius: 14,
+  marginBottom: 2,         // sits at bottom of avatar, aligning with bubble base
+},
 
 });

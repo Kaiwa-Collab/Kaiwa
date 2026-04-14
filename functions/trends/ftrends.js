@@ -78,7 +78,7 @@ async function fetchGitHubTrendingHelper(params) {
         q: query,
         sort: 'stars',
         order: 'desc',
-        per_page: 20, // Fetch max from API, paginate locally
+        per_page: 10, // Fetch max from API, paginate locally
       },
       headers: {
         Accept: 'application/vnd.github.v3+json',
@@ -111,7 +111,7 @@ async function fetchHackerNewsTrendingHelper() {
   );
 
   // Fetch up to 100 stories so we have enough to paginate
-  const ids = topStories.data.slice(0, 20);
+  const ids = topStories.data.slice(0, 10);
 
   const stories = await Promise.all(
     ids.map(async (id) => {
@@ -142,14 +142,14 @@ async function fetchHackerNewsTrendingHelper() {
 }
 
 async function fetchDevToTrendingHelper(params) {
-  const { tag = 'react', limit = 20 } = params || {};
+  const { tag = 'react', limit =10 } = params || {};
 
   const response = await axios.get(
     'https://dev.to/api/articles',
     {
       params: {
         tag,
-        per_page: Math.min(limit, 20), 
+        per_page: Math.min(limit,10), 
         top: 7,
       },
     }
@@ -383,7 +383,7 @@ exports.getTrendingQuestions = onCall(async (request) => {
       .collection('questions')
       .where('timestamp', '>=', thirtyDaysAgo)
       .orderBy('timestamp', 'desc')
-      .limit(200)
+      .limit(100)
       .get();
 
     const questions = questionsSnapshot.docs.map(doc => {

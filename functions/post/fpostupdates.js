@@ -1,6 +1,7 @@
 const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { onRequest, onCall } = require('firebase-functions/v2/https');
+const { onRequest, onCall, HttpsError } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
+const { onDocumentCreated, onDocumentDeleted } = require('firebase-functions/v2/firestore'); 
 
 if (!admin.apps.length) {
   admin.initializeApp();
@@ -117,6 +118,7 @@ const updatePopularPostsLogic = async () => {
         likeCount: data.likes || data.likeCount || 0,
         likes: data.likes || data.likeCount || 0,
         likedBy: data.likedBy || [],
+        commentCount: data.commentCount || 0,
         createdAt: data.createdAt,
       };
     });
@@ -271,6 +273,17 @@ exports.triggerPopularPostsUpdate = onRequest(
   }
 );
 
+// Callable variant for mobile clients using httpsCallable
+exports.triggerPopularPostsUpdateCallable = onCall(
+  { memory: '512MB' },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Must be authenticated');
+    }
+    return await updatePopularPostsLogic();
+  }
+);
+
 // ==================== HTTP: MANUAL TRIGGER FOR POPULAR USERS ====================
 exports.triggerPopularUsersUpdate = onRequest(
   { memory: '512MB' },
@@ -331,7 +344,7 @@ exports.getFollowingpost = onCall(
     if (!request.auth) throw new Error('Must be authenticated');
 
     const userId = request.auth.uid;
-    const { type, lastTimestamp, limit = 50 } = request.data;
+    const { type, lastTimestamp, sinceTimestamp, limit = 50 } = request.data;
     const db = admin.firestore();
 
     try {
@@ -354,7 +367,15 @@ exports.getFollowingpost = onCall(
           .where(userField, 'in', ids)
           .orderBy('timestamp', 'desc')
           .limit(limit);
-        if (lastTimestamp) {
+
+        // Incremental refresh: fetch only items newer than the provided timestamp.
+        if (sinceTimestamp) {
+          query = db.collection(collectionName)
+            .where(userField, 'in', ids)
+            .where('timestamp', '>', admin.firestore.Timestamp.fromDate(new Date(sinceTimestamp)))
+            .orderBy('timestamp', 'desc')
+            .limit(limit);
+        } else if (lastTimestamp) {
           query = query.startAfter(
             admin.firestore.Timestamp.fromDate(new Date(lastTimestamp))
           );
@@ -394,6 +415,7 @@ exports.getFollowingpost = onCall(
       const enrichedItems = uniqueItems.slice(0, limit).map(item => ({
         ...item,
         userAvatar: avatarMap[item.userId] || item.userAvatar || null,
+        commentCount: item.commentCount || 0,
       }));
 
       return {
@@ -406,6 +428,167 @@ exports.getFollowingpost = onCall(
     } catch (error) {
       console.error('Error fetching following feed:', error);
       throw new Error('Error fetching feed');
+    }
+  }
+);
+
+// ==================== CALLABLE: GET POPULAR POSTS INCREMENTAL ====================
+exports.getPopularPostsSince = onCall(
+  { memory: '512MB' },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Must be authenticated');
+    }
+
+    const { sinceTimestamp = null, excludeUserIds = [], limit = 50 } = request.data || {};
+    const db = admin.firestore();
+
+    try {
+      const aggregatedDoc = await db.collection('aggregated').doc('popularPosts').get();
+      if (!aggregatedDoc.exists) {
+        return { items: [], lastUpdated: null };
+      }
+
+      const data = aggregatedDoc.data() || {};
+      let posts = Array.isArray(data.posts) ? data.posts : [];
+
+      if (Array.isArray(excludeUserIds) && excludeUserIds.length > 0) {
+        const excluded = new Set(excludeUserIds);
+        posts = posts.filter(post => !excluded.has(post.userId));
+      }
+
+      if (sinceTimestamp) {
+        const sinceMs = new Date(sinceTimestamp).getTime();
+        if (!Number.isNaN(sinceMs)) {
+          posts = posts.filter(post => {
+            const raw = post?.createdAt || post?.timestamp || null;
+            if (!raw) return false;
+            const postMs = raw?.toDate ? raw.toDate().getTime() : new Date(raw).getTime();
+            return !Number.isNaN(postMs) && postMs > sinceMs;
+          });
+        }
+      }
+
+      const items = posts.slice(0, limit).map(post => ({
+        ...post,
+        likeCount: post.likeCount || post.likes || 0,
+        likes: post.likes || post.likeCount || 0,
+        commentCount: post.commentCount || 0,
+      }));
+
+      return {
+        items,
+        lastUpdated: data.lastUpdated || null,
+      };
+    } catch (error) {
+      console.error('Error fetching incremental popular posts:', error);
+      throw new HttpsError('internal', 'Failed to fetch incremental popular posts');
+    }
+  }
+);
+
+// ==================== FIRESTORE TRIGGERS: COMMENT COUNT ====================
+exports.onCommentCreated = onDocumentCreated(
+  'posts/{postId}/comments/{commentId}',
+  async (event) => {
+    const { postId } = event.params;
+    await admin.firestore()
+      .collection('posts')
+      .doc(postId)
+      .update({
+        commentCount: admin.firestore.FieldValue.increment(1),
+      });
+  }
+);
+
+exports.onCommentDeleted = onDocumentDeleted(
+  'posts/{postId}/comments/{commentId}',
+  async (event) => {
+    const { postId } = event.params;
+    await admin.firestore()
+      .collection('posts')
+      .doc(postId)
+      .update({
+        commentCount: admin.firestore.FieldValue.increment(-1),
+      });
+  }
+);
+
+exports.getCommentAvatars = onCall(
+  {
+    maxInstances: 10,
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (request) => {
+    // ── Auth check ─────────────────────────────
+    if (!request.auth) {
+      throw new HttpsError("unauthenticated", "User must be logged in");
+    }
+
+    const { userIds } = request.data;
+
+    // ── Validation ─────────────────────────────
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      throw new HttpsError(
+        "invalid-argument",
+        "userIds must be a non-empty array"
+      );
+    }
+
+    if (userIds.length > 50) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Maximum 50 userIds allowed"
+      );
+    }
+
+    const invalidIds = userIds.filter(
+      (id) => typeof id !== "string" || id.trim().length === 0
+    );
+
+    if (invalidIds.length > 0) {
+      throw new HttpsError(
+        "invalid-argument",
+        "All userIds must be valid strings"
+      );
+    }
+
+    const db = admin.firestore();
+
+    try {
+      // ── Batch fetch profiles ───────────────────
+      const refs = userIds.map((uid) =>
+        db.collection("profile").doc(uid)
+      );
+
+      const snaps = await db.getAll(...refs);
+
+      const avatarMap = {};
+
+      snaps.forEach((snap, i) => {
+        const uid = userIds[i];
+
+        if (snap.exists) {
+          const data = snap.data();
+
+          avatarMap[uid] = {
+            url: data?.avatar || null,
+            version: data?.avatarUpdatedAt || 0,
+          };
+        } else {
+          avatarMap[uid] = {
+            url: null,
+            version: 0,
+          };
+        }
+      });
+
+      return { avatarMap };
+
+    } catch (error) {
+      console.error("❌ Avatar fetch error:", error);
+      throw new HttpsError("internal", "Failed to fetch avatars");
     }
   }
 );

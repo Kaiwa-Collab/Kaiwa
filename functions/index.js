@@ -12,6 +12,7 @@ const chatFunctions = require('./chatsystem/fchat');
 const searchFunctions = require('./qna/fqna');
 const profileFunctions = require('./profile/fprofile');
 const searchPageFunctions = require('./search/fsearch');
+const notificationsFunctions = require('./notifications/fnotifications');
 
 // ==================== GITHUB FUNCTIONS ====================
 exports.githubCallback = githubFunctions.githubCallback;
@@ -20,15 +21,21 @@ exports.validateGitHubRepo = githubFunctions.validateGitHubRepo;
 exports.addGitHubCollaborator = githubFunctions.addGitHubCollaborator;
 exports.githubWebhook = githubFunctions.githubWebhook;
 exports.setupGitHubWebhook = githubFunctions.setupGitHubWebhook;
+exports.resendGithubInvite=githubFunctions.resendGithubInvite
 
 // ==================== POPULAR POSTS/USERS FUNCTIONS ====================
 exports.updatePopularPosts = popularFunctions.updatePopularPosts;
 exports.updatePopularUsers = popularFunctions.updatePopularUsers;
 
 exports.triggerPopularPostsUpdate = popularFunctions.triggerPopularPostsUpdate;
+exports.triggerPopularPostsUpdateCallable = popularFunctions.triggerPopularPostsUpdateCallable;
 exports.triggerPopularUsersUpdate = popularFunctions.triggerPopularUsersUpdate;
 exports.checkAggregatedStatus = popularFunctions.checkAggregatedStatus;
 exports.getFollowingpost=popularFunctions.getFollowingpost;
+exports.getPopularPostsSince = popularFunctions.getPopularPostsSince;
+exports.onCommentCreated =popularFunctions.onCommentCreated
+exports.onCommentDeleted = popularFunctions.onCommentDeleted;
+exports.getCommentAvatars = popularFunctions.getCommentAvatars;
 
 // ==================== TRENDING FUNCTIONS ====================
 exports.updateTrendingPosts = trendingFunctions.updateTrendingPosts;
@@ -100,3 +107,6 @@ exports.removeProjectSuggestion = searchPageFunctions.removeProjectSuggestion;
 exports.sendProjectJoinRequest = searchPageFunctions.sendProjectJoinRequest;
 exports.acceptProjectJoinRequest = searchPageFunctions.acceptProjectJoinRequest;
 exports.rejectProjectJoinRequest = searchPageFunctions.rejectProjectJoinRequest;
+
+// ==================== NOTIFICATIONS CLEANUP (SCHEDULED) ====================
+exports.cleanupOldNotifications = notificationsFunctions.cleanupOldNotifications;

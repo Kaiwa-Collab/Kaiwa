@@ -21,7 +21,14 @@ screenOptions={{
 
      })} 
      />
-    <Stack.Screen name="Addbio" component={Addbio} />
+    <Stack.Screen
+      name="Addbio"
+      component={Addbio}
+      options={{
+        animationEnabled: false,
+        detachPreviousScreen: false,
+      }}
+    />
     <Stack.Screen name="FollowersFollowing" component={FollowersFollowing} />
     <Stack.Screen name="githubConnection" component={githubConnection} />
 </Stack.Navigator>

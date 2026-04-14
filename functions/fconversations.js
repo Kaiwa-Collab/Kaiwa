@@ -1,4 +1,3 @@
-
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const admin = require('firebase-admin');
@@ -544,23 +543,23 @@ exports.fixChatParticipants = onSchedule(
           if (chatId.includes('_') && !chatId.startsWith('group_')) {
             const possibleUserIds = chatId.split('_').filter(id => id && id.length > 10);
             
-            if (possibleUserIds.length >= 2) {
-              batch.update(admin.firestore().collection('chats').doc(chatId), {
-                participants: possibleUserIds,
-                isActive: true,
-                type: 'direct',
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-              });
+            // if (possibleUserIds.length >= 2) {
+            //   batch.update(admin.firestore().collection('chats').doc(chatId), {
+            //     participants: possibleUserIds,
+            //     isActive: true,
+            //     type: 'direct',
+            //     updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            //   });
               
-              fixedCount++;
-              batchCount++;
+            //   fixedCount++;
+            //   batchCount++;
               
-              // Commit batch every 500 operations
-              if (batchCount >= 500) {
-                await batch.commit();
-                batchCount = 0;
-              }
-            }
+            //   // Commit batch every 500 operations
+            //   if (batchCount >= 500) {
+            //     await batch.commit();
+            //     batchCount = 0;
+            //   }
+            // }
           }
         }
       }

@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import {
-  StyleSheet, Text, View, Image, TouchableOpacity, FlatList, TextInput, SafeAreaView, KeyboardAvoidingView, Platform, Alert,
+  StyleSheet, Text, View, Image, TouchableOpacity, FlatList, TextInput, SafeAreaView, KeyboardAvoidingView, Platform, Alert, StatusBar,
 } from 'react-native';
 import Icon from 'react-native-vector-icons/FontAwesome';
 import { useNavigation, useRoute } from '@react-navigation/native';
@@ -8,20 +8,60 @@ import firestore from '@react-native-firebase/firestore';
 import auth from '@react-native-firebase/auth';
 import Post from '../Post';
 import { useUserData } from '../users';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {  Keyboard } from 'react-native';
+import functions from '@react-native-firebase/functions';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const CommentScreen = () => {
+  
   const navigation = useNavigation();
   const route = useRoute();
-  const { postId, image, name,username,avatar } = route.params || {};
+  const { postId, image, name, username, avatar } = route.params || {};
   const [comments, setComments] = useState([]);
   const [commentInput, setCommentInput] = useState('');
   const [replyingTo, setReplyingTo] = useState(null);
   const [loading, setLoading] = useState(false);
   const flatListRef = useRef(null);
   const inputRef = useRef(null);
+  const insets = useSafeAreaInsets();
+  const [commentAvatarMap, setCommentAvatarMap] = useState({});
+const avatarHydrationRef = useRef(new Set());
   
   // Get cached user data from context
-  const { profile, getCachedImageUri } = useUserData();
+  const { profile, getCachedImageUri,cacheImage } = useUserData();
+  const CACHE_DURATION = 24 * 60 * 60 * 1000;
+
+  // At the top, add Keyboard to imports
+
+
+// Inside CommentScreen, add this state + effect:
+const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+useEffect(() => {
+  const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
+    setKeyboardHeight(e.endCoordinates.height);
+  });
+  const hideSub = Keyboard.addListener('keyboardDidHide', () => {
+    setKeyboardHeight(0);
+  });
+  return () => {
+    showSub.remove();
+    hideSub.remove();
+  };
+}, []);
+
+useEffect(() => {
+  if (comments.length > 0) {
+    hydrateCommentAvatars();
+  }
+}, [comments.length]);
+
+  // This screen renders its own Instagram-style header.
+  // Hide the navigator header to avoid duplicate headers.
+  useLayoutEffect(() => {
+    navigation.setOptions({ headerShown: false });
+  }, [navigation]);
   
 
   // Debug route params
@@ -47,6 +87,14 @@ const CommentScreen = () => {
   // const effectivePostId = postId; // Remove this line once you fix the navigation
 
   // ----------- REAL-TIME COMMENTS LOADING -----------
+  const getCreatedAtMs = (value) => {
+    if (!value) return Date.now();
+    if (typeof value?.toDate === 'function') return value.toDate().getTime();
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === 'number') return value;
+    return Date.now();
+  };
+
   useEffect(() => {
     const effectivePostId = postId;
     
@@ -76,6 +124,9 @@ const CommentScreen = () => {
             });
           });
          
+          // Keep oldest->newest so latest always stays at bottom near input.
+          // If serverTimestamp is still pending, treat as "now" temporarily.
+          commentList.sort((a, b) => getCreatedAtMs(a.createdAt) - getCreatedAtMs(b.createdAt));
           setComments(commentList);
         },
         (error) => {
@@ -93,6 +144,23 @@ const CommentScreen = () => {
     
     return unsubscribe;
   }, [postId]);
+
+  // Keep newest comments visible near the input (Instagram-like bottom focus).
+  useEffect(() => {
+    if (!comments.length) return;
+    const id = setTimeout(() => {
+      flatListRef.current?.scrollToEnd({ animated: false });
+    }, 80);
+    return () => clearTimeout(id);
+  }, [comments.length]);
+
+  useEffect(() => {
+  navigation.setParams({syncedCommentCount: comments.length});
+
+  if(typeof route.params?.onCommentCountSync === 'function') {
+    route.params.onCommentCountSync(comments.length);
+  }
+}, [comments.length]);
 
   // ----------- TIMESTAMP FORMATTING -----------
   const formatTimestamp = (timestamp) => {
@@ -216,22 +284,20 @@ const CommentScreen = () => {
         ...newComment,
         createdAt: firestore.FieldValue.serverTimestamp(),
       });
-      
-      
 
       // Try to update post's comment count
-      try {
-        await firestore()
-          .collection('posts')
-          .doc(postId)
-          .update({
-            commentCount: firestore.FieldValue.increment(1),
-            lastCommentAt: firestore.FieldValue.serverTimestamp(),
-          });
+      // try {
+      //   await firestore()
+      //     .collection('posts')
+      //     .doc(postId)
+      //     .update({
+      //       commentCount: firestore.FieldValue.increment(1),
+      //       lastCommentAt: firestore.FieldValue.serverTimestamp(),
+      //     });
       
-      } catch (updateError) {
+      // } catch (updateError) {
         
-      }
+      // }
     }
     
     setCommentInput('');
@@ -385,17 +451,17 @@ const CommentScreen = () => {
               await commentDocRef.delete();
               
               // Update post comment count (optional)
-              try {
-                await firestore()
-                  .collection('posts')
-                  .doc(postId)
-                  .update({
-                    commentCount: firestore.FieldValue.increment(-1),
-                  });
-              } catch (updateError) {
+              // try {
+              //   await firestore()
+              //     .collection('posts')
+              //     .doc(postId)
+              //     .update({
+              //       commentCount: firestore.FieldValue.increment(-1),
+              //     });
+              // } catch (updateError) {
                 
-              }
-              
+              // }
+
             } catch (error) {
               if (error.code === 'not-found') {
                 Alert.alert('Error', 'Comment was not found');
@@ -409,12 +475,100 @@ const CommentScreen = () => {
     );
   };
 
+ const hydrateCommentAvatars = async () => {
+    const uniqueUserIds = [
+      ...new Set(comments.map(c => c.userId).filter(Boolean))
+    ].filter(uid => !avatarHydrationRef.current.has(uid));
+
+    if (!uniqueUserIds.length) return;
+
+    uniqueUserIds.forEach(uid => avatarHydrationRef.current.add(uid));
+
+    // 1. Check cache
+    const cacheResults = await Promise.all(
+      uniqueUserIds.map(async uid => ({
+        uid,
+        cached: await loadCachedCommentAvatar(uid)
+      }))
+    );
+
+    const fromCache = {};
+    const stillNeedsFetch = [];
+
+    cacheResults.forEach(({ uid, cached }) => {
+      if (cached) {
+        fromCache[uid] = cached.url;
+        cacheImage(cached.url);
+      } else {
+        stillNeedsFetch.push(uid);
+      }
+    });
+
+    if (Object.keys(fromCache).length) {
+      setCommentAvatarMap(prev => ({ ...prev, ...fromCache }));
+    }
+
+    if (!stillNeedsFetch.length) return;
+
+    // 2. Fetch from Cloud Function
+    try {
+      const fn = functions().httpsCallable("getCommentAvatars");
+      const result = await fn({ userIds: stillNeedsFetch });
+
+      const freshMap = {};
+
+      for (const [uid, { url, version }] of Object.entries(result.data.avatarMap)) {
+        const cached = await loadCachedCommentAvatar(uid);
+
+        if (!cached || cached.version !== version) {
+          freshMap[uid] = url;
+          await saveCachedCommentAvatar(uid, url, version);
+          if (url) cacheImage(url);
+        } else {
+          freshMap[uid] = cached.url;
+        }
+      }
+
+      setCommentAvatarMap(prev => ({ ...prev, ...freshMap }));
+
+    } catch (e) {
+      console.warn("Avatar hydration failed:", e.message);
+    }
+  };
+
+  const saveCachedCommentAvatar = async (uid, url, version) => {
+  await AsyncStorage.setItem(
+    `comment_avatar_${uid}`,
+    JSON.stringify({ url, version, timestamp: Date.now() })
+  );
+};
+
+const loadCachedCommentAvatar = async (uid) => {
+  try {
+    const stored = await AsyncStorage.getItem(`comment_avatar_${uid}`);
+    if (!stored) return null;
+
+    const parsed = JSON.parse(stored);
+
+    if (Date.now() - parsed.timestamp > CACHE_DURATION) {
+      await AsyncStorage.removeItem(`comment_avatar_${uid}`);
+      return null;
+    }
+
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
   // ----------- REPLY STARTER -----------
   const startReply = (comment) => {
     setReplyingTo(comment);
-    setCommentInput(`@${comment.username} `);
+    setCommentInput('');
     inputRef.current?.focus();
   };
+
+
 
   // ----------- RENDER REPLY -----------
   const renderReply = ({ item: reply, parentId }) => {
@@ -452,7 +606,9 @@ const CommentScreen = () => {
     return (
       <View style={styles.replyContainer}>
         <Image 
-          source={{ uri: reply.avatar || 'https://randomuser.me/api/portraits/lego/0.jpg' }} 
+          source={{uri: getCachedImageUri(
+  commentAvatarMap[reply.userId] || reply.avatar
+) }} 
           style={styles.replyAvatar} 
         />
         <View style={styles.replyContent}>
@@ -490,10 +646,14 @@ const CommentScreen = () => {
 
     return (
       <View style={styles.commentContainer}>
-        <Image 
-          source={{ uri: getCachedImageUri(comment.avatar) || comment.avatar || 'https://randomuser.me/api/portraits/lego/0.jpg' }} 
-          style={styles.avatar} 
-        />
+   <Image 
+  source={{
+    uri: getCachedImageUri(
+      commentAvatarMap[comment.userId] || comment.avatar
+    )
+  }}
+  style={styles.avatar}
+/>
         <View style={styles.commentContent}>
           <Text style={styles.commentText}>
             <Text style={styles.username}>{comment.username}</Text> {comment.text}
@@ -540,18 +700,20 @@ const CommentScreen = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Icon name="arrow-left" size={24} color="white" />
+          <Text style={styles.backButtonText}>←</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Comments</Text>
-        <TouchableOpacity>
-          <Icon name="share" size={20} color="white" />
-        </TouchableOpacity>
+        <View style={{ width: 30 }} />
       </View>
       
-      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardAvoidingView
+  style={styles.flex}
+  behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+  keyboardVerticalOffset={0}
+>
         <FlatList
           ref={flatListRef}
           data={comments}
@@ -560,6 +722,10 @@ const CommentScreen = () => {
           style={styles.commentsList}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.commentsContent}
+          keyboardShouldPersistTaps="handled"
+          onContentSizeChange={() => {
+            flatListRef.current?.scrollToEnd({ animated: false });
+          }}
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Text style={styles.emptyText}>No comments yet</Text>
@@ -577,9 +743,20 @@ const CommentScreen = () => {
           </View>
         )}
         
-        <View style={styles.inputContainer}>
-          <Image 
-            source={{ uri: getCachedImageUri(profile?.avatar) || profile?.avatar || auth().currentUser?.photoURL || 'https://randomuser.me/api/portraits/lego/0.jpg' }} 
+   <View style={[
+  styles.inputContainer,
+  Platform.OS === 'android'
+    ? keyboardHeight > 0
+      ? { marginBottom: keyboardHeight + 30 }           // keyboard open: push above keyboard
+      : { paddingBottom: Math.max(insets.bottom, 30) }  // keyboard closed: clear nav bar
+    : { paddingBottom: insets.bottom > 0 ? insets.bottom : 12 }  // iOS unchanged
+]}>
+   <Image 
+  source={{
+    uri: getCachedImageUri(
+      profile?.avatar || auth().currentUser?.photoURL
+    )
+  }}
             style={styles.inputAvatar} 
           />
           <TextInput
@@ -592,6 +769,11 @@ const CommentScreen = () => {
             multiline
             maxLength={2200}
             editable={!loading}
+            onFocus={() => {
+  setTimeout(() => {
+    flatListRef.current?.scrollToEnd({ animated: true });
+  }, 100);
+}}
           />
           <TouchableOpacity 
             onPress={addComment} 
@@ -614,7 +796,7 @@ const CommentScreen = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: '#121212',
   },
   flex: {
     flex: 1,
@@ -625,19 +807,22 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 16,
     paddingVertical: 12,
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 0) + 12 : 12,
     borderBottomWidth: 0.5,
     borderBottomColor: '#333',
+    justifyContent: 'space-between', 
   },
   headerTitle: {
     color: 'white',
     fontSize: 18,
     fontWeight: '600',
+   
   },
   commentsList: {
     flex: 1,
   },
   commentsContent: {
-    paddingBottom: 20,
+    paddingBottom: 80,
   },
   commentContainer: {
     flexDirection: 'row',
@@ -730,15 +915,16 @@ const styles = StyleSheet.create({
     color: '#8e8e8e',
     fontSize: 13,
   },
-  inputContainer: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderTopWidth: 0.5,
-    borderTopColor: '#333',
-    backgroundColor: '#000',
-  },
+inputContainer: {
+  flexDirection: 'row',
+  alignItems: 'center',   // 👈 important (not flex-end)
+  paddingHorizontal: 16,
+  paddingTop: 10,
+  // paddingBottom:Platform.OS === 'android' ? 20: 12,  // 👈 more bottom space
+  backgroundColor: '#121212',
+  borderTopWidth: 0.5,
+  borderTopColor: '#333',
+},  
   inputAvatar: {
     width: 32,
     height: 32,
@@ -746,12 +932,15 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   textInput: {
-    flex: 1,
-    color: 'white',
-    fontSize: 14,
-    maxHeight: 100,
-    paddingVertical: 8,
-  },
+  flex: 1,
+  color: 'white',
+  fontSize: 14,
+  backgroundColor: '#1a1a1a',   // 👈 important
+  borderRadius: 20,
+  paddingHorizontal: 12,
+  paddingVertical: 8,
+  maxHeight: 100,
+},
   postButton: {
     marginLeft: 12,
     paddingVertical: 8,
@@ -775,6 +964,11 @@ const styles = StyleSheet.create({
     color: '#666',
     fontSize: 14,
     marginTop: 4,
+  },
+   backButtonText: {
+    color: 'white',
+    fontSize: 30,
+    fontWeight: 'bold',
   },
 });
 

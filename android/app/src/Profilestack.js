@@ -4,7 +4,8 @@ import Profile from './screen/Profile';
 import Settings from './screen/Settings';
 import AskQuestion from './screen/AskQuestion';
 import Post from './Post';
-import SettingsStack from './settingsstack';
+import SettingsStack from './SettingsStack';
+import PostDetail from './secondary_screens/postDetail';
 
 
 const Stack = createStackNavigator();
@@ -26,7 +27,8 @@ export default function ProfileStack() {
       />
       <Stack.Screen name="Settings" component={SettingsStack} />
       <Stack.Screen name="AskQuestion" component={AskQuestion} />
-      <Stack.Screen name="PostDetail" component={Post} />
+      <Stack.Screen name="PostDetail" component={PostDetail} />
+      
     </Stack.Navigator>
   );
 }

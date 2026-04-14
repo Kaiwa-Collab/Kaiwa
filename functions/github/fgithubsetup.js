@@ -463,7 +463,63 @@ async function processWebhookEvent(event, payload, project) {
     projectTitle: project.title
   };
 
-  switch (event) {
+//   console.log(`🔔 EVENT: ${event} | ACTION: ${payload.action} | REPO: ${payload.repository?.full_name}`);
+// if (event === 'member') {
+//   console.log('🔔 FULL MEMBER PAYLOAD:', JSON.stringify({
+//     action: payload.action,
+//     member: payload.member,
+//     sender: payload.sender?.login,
+//     invitation: payload.invitation,
+//   }, null, 2));
+// }
+   switch (event) {
+    case 'member':
+      if (payload.action === 'added') {
+
+  //        console.log(`🔔 member action received: "${payload.action}"`);
+  // console.log(`🔔 member.login: "${payload.member?.login}"`);
+  // console.log(`🔔 sender.login: "${payload.sender?.login}"`);
+  
+        const acceptedGithubUsername = payload.member?.login;
+
+        if (!acceptedGithubUsername) break;
+
+        const userSnap = await admin.firestore()
+          .collection('users')
+          .where('githubUsername', '==', acceptedGithubUsername)
+          .limit(1)
+          .get();
+
+        if (!userSnap.empty) {
+          const acceptedUid = userSnap.docs[0].id;
+
+          const projectsSnap = await admin.firestore()
+            .collection('collaborations')
+            .where('chatId', '==', chatId)
+            .limit(1)
+            .get();
+
+          if (!projectsSnap.empty) {
+            const pendingIds = projectsSnap.docs[0].data().pendingGitHubAcceptance || [];
+
+            if (pendingIds.includes(acceptedUid)) {
+              await projectsSnap.docs[0].ref.update({
+                pendingGitHubAcceptance: admin.firestore.FieldValue.arrayRemove(acceptedUid),
+              });
+              console.log(`✅ Removed ${acceptedGithubUsername} from pendingGitHubAcceptance`);
+              message = `✅ @${acceptedGithubUsername} accepted the GitHub repository invitation`;
+              metadata.acceptedUser = acceptedGithubUsername;
+            } else {
+              console.log(`ℹ️ ${acceptedGithubUsername} was not in pendingGitHubAcceptance — skipping`);
+            }
+          }
+        } else {
+          console.log(`⚠️ No Firestore user found for GitHub username: ${acceptedGithubUsername}`);
+        }
+      }
+      break;
+
+  
     case 'push':
       const pusher = payload.pusher?.name || payload.sender?.login || 'Someone';
       const commits = payload.commits || [];
@@ -692,5 +748,193 @@ exports.setupGitHubWebhook = onRequest(async (req, res) => {
       success: false,
       error: error.response?.data?.message || error.message
     });
+  }
+});
+
+exports.resendGithubInvite = onCall(async (request) => {
+  console.log('🔄 Resending GitHub invite:', request.data);
+
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'User must be authenticated');
+  }
+
+  const { userId, chatId } = request.data;
+
+  if (!userId || !chatId) {
+    throw new HttpsError('invalid-argument', 'userId and chatId are required');
+  }
+
+  try {
+    // Step 1: Find the collaboration for this chat
+    const projectsSnapshot = await admin.firestore()
+      .collection('collaborations')
+      .where('chatId', '==', chatId)
+      .get();
+
+    if (projectsSnapshot.empty) {
+      throw new HttpsError('not-found', 'No collaboration found for this chat');
+    }
+
+    const projectDoc = projectsSnapshot.docs[0];
+    const projectData = projectDoc.data();
+
+    // Step 2: Verify the caller is the creator
+    if (projectData.creatorId !== request.auth.uid) {
+      throw new HttpsError('permission-denied', 'Only the project creator can resend invites');
+    }
+
+    // Step 3: Verify the target user is actually in pendingGithubAcceptance
+    const pendingIds = projectData.pendingGitHubAcceptance || [];
+    if (!pendingIds.includes(userId)) {
+      throw new HttpsError(
+        'failed-precondition',
+        'This user has already accepted or is not pending'
+      );
+    }
+
+    // Step 4: Get target user's GitHub username from users collection
+    const targetUserDoc = await admin.firestore()
+      .collection('users')
+      .doc(userId)
+      .get();
+
+    if (!targetUserDoc.exists) {
+      throw new HttpsError('not-found', 'Target user not found');
+    }
+
+    const targetUserData = targetUserDoc.data();
+    const githubUsername = targetUserData?.githubUsername;
+
+    if (!githubUsername) {
+      throw new HttpsError(
+        'failed-precondition',
+        'Target user has not connected their GitHub account'
+      );
+    }
+
+    // Step 5: Get creator's GitHub token
+    const creatorDoc = await admin.firestore()
+      .collection('users')
+      .doc(projectData.creatorId)
+      .get();
+
+    const creatorData = creatorDoc.data();
+
+    if (!creatorData?.githubAccessToken) {
+      throw new HttpsError(
+        'failed-precondition',
+        'Project creator GitHub token not found'
+      );
+    }
+
+    // Step 6: Extract owner and repo from githubRepo URL
+    const repoMatch = projectData.githubRepo.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+    if (!repoMatch) {
+      throw new HttpsError('invalid-argument', 'Invalid GitHub repository URL');
+    }
+
+    const owner = repoMatch[1];
+    const repo = repoMatch[2].replace('.git', '');
+
+    console.log(`🔄 Resending invite to @${githubUsername} for ${owner}/${repo}`);
+
+    // Step 7: First remove existing invite then re-add
+    // This forces GitHub to resend the invitation email
+    try {
+      // Step 7A: Get pending invitations
+      const invitesRes = await axios.get(
+        `https://api.github.com/repos/${owner}/${repo}/invitations`,
+        {
+          headers: {
+            Authorization: `Bearer ${creatorData.githubAccessToken}`,
+            Accept: 'application/vnd.github.v3+json',
+          },
+        }
+      );
+
+      // Step 7B: Find this user's invite
+      const invite = invitesRes.data.find(
+        inv => inv.invitee?.login === githubUsername
+      );
+
+      // Step 7C: Delete old invite if exists
+      if (invite) {
+        await axios.delete(
+          `https://api.github.com/repos/${owner}/${repo}/invitations/${invite.id}`,
+          {
+            headers: {
+              Authorization: `Bearer ${creatorData.githubAccessToken}`,
+              Accept: 'application/vnd.github.v3+json',
+            },
+          }
+        );
+
+        console.log(`🗑️ Deleted old invite for @${githubUsername}`);
+      }
+
+    } catch (inviteErr) {
+      console.warn('⚠️ Invite cleanup failed:', inviteErr.message);
+    }
+
+    // Step 8: Send fresh invite
+    await axios.put(
+      `https://api.github.com/repos/${owner}/${repo}/collaborators/${githubUsername}`,
+      { permission: 'push' },
+      {
+        headers: {
+          Authorization: `Bearer ${creatorData.githubAccessToken}`,
+          Accept: 'application/vnd.github.v3+json',
+        },
+      }
+    );
+
+    console.log(`✅ New invite sent to @${githubUsername}`);
+
+   await projectDoc.ref.update({
+  [`inviteMeta.${userId}.lastSent`]: admin.firestore.FieldValue.serverTimestamp()
+});
+    // Step 9: Notify chat
+    await admin.firestore()
+      .collection('chats')
+      .doc(chatId)
+      .collection('messages')
+      .add({
+        text: `🔄 GitHub invitation resent to @${githubUsername}`,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        senderId: 'github',
+        isSystemMessage: true,
+        type: 'github_event',
+      });
+
+    return {
+      success: true,
+      message: `Invite resent to @${githubUsername}`,
+    };
+
+  } catch (err) {
+    console.error('❌ Error:', err.response?.data || err.message);
+
+    // 🔥 If already collaborator → clean pending list
+    if (err.response?.status === 422) {
+      const projectsSnapshot = await admin.firestore()
+        .collection('collaborations')
+        .where('chatId', '==', chatId)
+        .get();
+
+      if (!projectsSnapshot.empty) {
+        await projectsSnapshot.docs[0].ref.update({
+          pendingGitHubAcceptance: admin.firestore.FieldValue.arrayRemove(userId),
+        });
+      }
+
+      return {
+        success: true,
+        message: 'User already collaborator → removed from pending',
+      };
+    }
+
+    if (err instanceof HttpsError) throw err;
+
+    throw new HttpsError('internal', err.message);
   }
 });

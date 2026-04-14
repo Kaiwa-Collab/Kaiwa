@@ -23,6 +23,19 @@
 
   const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 
+  /** Remove prior avatar from Storage when it was uploaded under this user's avatars/ prefix. */
+  const deletePreviousProfileAvatarIfOwned = async (previousUrl, uid) => {
+    if (!previousUrl || typeof previousUrl !== 'string' || !uid) return;
+    if (previousUrl.includes('cdn.britannica.com') || previousUrl.includes('placehold.co')) return;
+    try {
+      const ref = storage().refFromURL(previousUrl);
+      if (!ref.fullPath.startsWith(`avatars/${uid}/`)) return;
+      await ref.delete();
+    } catch {
+      // Invalid URL, missing object, or permission — safe to ignore
+    }
+  };
+
   const Profile = () => {
     const route = useRoute();
     const { userId, username } = route.params || {};
@@ -31,6 +44,7 @@
     const currentUser = auth().currentUser;
     const viewedUserId = route.params?.userId || currentUser?.uid;
     const { posts, getCachedImageUri } = useUserData();
+    const [transitioning, setTransitioning] = useState(false);
 
     // State variables
     const [activeTab, setActiveTab] = useState('posts');
@@ -83,6 +97,22 @@
 
     const isOwnProfile = viewedUserId === currentUser?.uid;
 
+
+    useEffect(() => {
+  // Immediately wipe visible state so old profile never shows through
+  setUserData(null);
+  setUserProfile(null);
+  setDisplayName('');
+  setAvatarUrl('');
+  setUserPosts([]);
+  setUserQuestions([]);
+  setCollaborationProjects([]);
+  setIsFollowing(false);
+  setRequestSent(false);
+  setCanViewContent(false);
+  setLoading(true);
+}, [viewedUserId]);
+
     // Refresh function
     const onRefresh = useCallback(async () => {
       setRefreshing(true);
@@ -101,7 +131,7 @@
     useFocusEffect(
       useCallback(() => {
         
-          loadUserData();
+          // loadUserData();
         
         if (activeTab === 'Collaborations' && viewedUserId) {
           fetchCollaborationProjects();
@@ -443,6 +473,7 @@
       setEditProjectTech(project.tech || '');
       setEditGithubRepo(project.githubRepo || '');
       await fetchProjectParticipants(project);
+      fetchFollowingUsers();
       setProjectEditModalVisible(true);
     };
 
@@ -768,6 +799,7 @@
         });
         if (result.assets && result.assets.length > 0) {
           const image = result.assets[0];
+          const previousAvatarUrl = userProfile?.avatar || avatarUrl;
           Alert.alert('Uploading', 'Please wait while we update your profile picture...');
           await ensureProfileExists(currentUser.uid);
           const fileName = `avatar${currentUser.uid}_${Date.now()}.jpg`;
@@ -777,7 +809,9 @@
 
           await functions().httpsCallable('updateAvatar')({ avatarUrl: downloadUrl });
 
-          
+          if (previousAvatarUrl && previousAvatarUrl !== downloadUrl) {
+            await deletePreviousProfileAvatarIfOwned(previousAvatarUrl, currentUser.uid);
+          }
 
           setAvatarUrl(downloadUrl);
           setUserProfile(prev => prev ? ({ ...prev, avatar: downloadUrl }) : prev);
@@ -924,7 +958,22 @@
                     { marginRight: (idx + 1) % 3 === 0 ? 0 : 8 }
                   ]}
                   activeOpacity={0.8}
-                  onPress={() => navigation.navigate('PostDetail', { postId: post.id })}
+                  onPress={() => navigation.navigate('PostDetail', {
+  postData: {
+    postsId: post.id,
+    name: post.username || displayName,
+    image: post.imageUrl || null,
+    Avatar: post.userAvatar || avatarUrl || null,
+    caption: post.caption || post.content || '',
+    initialLikeCount: post.likeCount || post.likes || 0,
+    initialLikedBy: post.likedBy || [],
+    createdAt: post.createdAt,
+    userId: post.userId,
+    commentCount: post.commentCount || 0,
+  },
+  allPosts: visiblePosts,
+  initialIndex: idx,
+})}
                 >
                   <Image
                     source={{ uri: getCachedImageUri(post.imageUrl) }}
@@ -1547,7 +1596,7 @@
       return null;
     };
 
-    if (loading) {
+    if (loading || !userData && !userProfile) {
       return (
         <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
           <ActivityIndicator size="large" color="#007AFF" />

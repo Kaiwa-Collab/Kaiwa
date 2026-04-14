@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useNotifications } from '../NotificationsContext';
 import {
   View,
@@ -17,19 +17,22 @@ import {
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import firestore from '@react-native-firebase/firestore';
 import auth from '@react-native-firebase/auth';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import chatService from './chatService';
 import functions from '@react-native-firebase/functions';
 import { getGitHubStatus } from '../../service/getGitHubStatus';
 import ProjectDetailsModal from '../../service/ProjectDetailsModal';
 
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
+const ACTION_REQUIRED_TYPES = ['follow_request', 'collaboration_invite', 'project_join_request'];
 
 const Notifications = () => {
   const { notifications, loading } = useNotifications();
   const [refreshing, setRefreshing] = useState(false);
   const [followRequests, setFollowRequests] = useState([]);
   const [showRequests, setShowRequests] = useState(false);
+  /** When set, bottom sheet shows only the request from this sender (from tapped notification). */
+  const [modalFollowSenderUid, setModalFollowSenderUid] = useState(null);
   const [loadingCollabDetails, setLoadingCollabDetails] = useState(false);
   const [projectDetailsVisible, setProjectDetailsVisible] = useState(false);
   const [selectedProjectForDetails, setSelectedProjectForDetails] = useState(null);
@@ -86,6 +89,24 @@ const Notifications = () => {
       
     }
   };
+
+  const markNonActionNotificationsAsRead = useCallback(async () => {
+    try {
+      const unreadNonAction = notifications.filter(
+        n => !n.read && !ACTION_REQUIRED_TYPES.includes(n.type)
+      );
+      if (unreadNonAction.length === 0) return;
+
+      const batch = firestore().batch();
+      unreadNonAction.forEach(notification => {
+        const ref = firestore().collection('notifications').doc(notification.id);
+        batch.update(ref, { read: true });
+      });
+      await batch.commit();
+    } catch (error) {
+      console.log('[Notifications] Failed to auto-mark non-action notifications as read:', error?.message);
+    }
+  }, [notifications]);
 
   const deleteNotification = async (notificationId) => {
     try {
@@ -178,6 +199,8 @@ const Notifications = () => {
         senderUsername: myUsername
       });
 
+      setShowRequests(false);
+      setModalFollowSenderUid(null);
       Alert.alert('Success', 'Follow request accepted');
     } catch (e) {
       
@@ -190,7 +213,9 @@ const Notifications = () => {
     try {
       await firestore().collection('profile').doc(currentUserUid)
         .collection('followRequests').doc(request.id).delete();
-      
+
+      setShowRequests(false);
+      setModalFollowSenderUid(null);
       Alert.alert('Success', 'Follow request rejected');
     } catch (e) {
       
@@ -433,14 +458,16 @@ const acceptCollaborationInvite = async (notification) => {
       Alert.alert('Error', 'Failed to reject collaboration invite');
     }
   };
+useFocusEffect(
+  useCallback(() => {
+    return () => {
+      markNonActionNotificationsAsRead();
+    };
+  }, [markNonActionNotificationsAsRead])
+);
+
 const handleNotificationPress = async (notification) => {
-   const actionRequiredTypes = [
-    
-    'follow_request',
-    'collaboration_invite', 
-    'project_join_request'
-  ];
-  if (!notification.read && !actionRequiredTypes.includes(notification.type)) {
+  if (!notification.read && !ACTION_REQUIRED_TYPES.includes(notification.type)) {
     await markAsRead(notification.id);
   }
 
@@ -483,9 +510,16 @@ const handleNotificationPress = async (notification) => {
   };
 
   switch (notification.type) {
-    case 'follow_request':
+    case 'follow_request': {
+      const senderUid =
+        notification.senderUid ||
+        notification.data?.from ||
+        notification.data?.senderUid ||
+        null;
+      setModalFollowSenderUid(senderUid);
       setShowRequests(true);
       break;
+    }
 
     case 'follow_accepted':
     case 'new_follower':
@@ -698,7 +732,8 @@ const handleRejectJoinRequest = async (notification) => {
     setRefreshing(true);
     setTimeout(() => setRefreshing(false), 1000);
   };
-  const handlegoback=()=>{
+  const handlegoback=async()=>{
+    await markNonActionNotificationsAsRead();
     navigation.goBack()
   }
 
@@ -848,36 +883,56 @@ const renderNotificationText = (notification) => {
         contentContainerStyle={notifications.length === 0 ? styles.emptyContainer : null}
       />
 
-      {/* Follow Requests Modal */}
+      {/* Follow Requests Modal — one row when opened from a specific notification */}
       <Modal
         visible={showRequests}
         transparent
         animationType="slide"
-        onRequestClose={() => setShowRequests(false)}
+        onRequestClose={() => {
+          setShowRequests(false);
+          setModalFollowSenderUid(null);
+        }}
       >
         <TouchableOpacity 
           style={styles.modalOverlay} 
           activeOpacity={1}
-          onPress={() => setShowRequests(false)}
+          onPress={() => {
+            setShowRequests(false);
+            setModalFollowSenderUid(null);
+          }}
         >
           <View style={styles.modalContent} onStartShouldSetResponder={() => true}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Follow Requests</Text>
+              <Text style={styles.modalTitle}>
+                {modalFollowSenderUid ? 'Follow request' : 'Follow Requests'}
+              </Text>
             </View>
 
-            {followRequests.length === 0 ? (
+            {(() => {
+              const list = modalFollowSenderUid
+                ? followRequests.filter((r) => r.from === modalFollowSenderUid)
+                : followRequests;
+              return list.length === 0 ? (
               <View style={styles.emptyRequests}>
                 <Ionicons name="people-outline" size={48} color="#ccc" />
-                <Text style={styles.emptyRequestsText}>No new requests</Text>
+                <Text style={styles.emptyRequestsText}>
+                  {modalFollowSenderUid
+                    ? 'No pending request for this user.'
+                    : 'No new requests'}
+                </Text>
               </View>
             ) : (
               <FlatList
-                data={followRequests}
+                data={list}
                 keyExtractor={(item) => item.id}
                 renderItem={({ item: req }) => (
                   <View style={styles.requestItem}>
                     <View style={styles.requestInfo}>
-                      <TouchableOpacity onPress={() => { setShowRequests(false); navigation.navigate('Profile', { screen: 'Profile', params: { userId: req.from } }); }}>
+                      <TouchableOpacity onPress={() => {
+                        setShowRequests(false);
+                        setModalFollowSenderUid(null);
+                        navigation.navigate('Profile', { screen: 'Profile', params: { userId: req.from } });
+                      }}>
                         <Text style={[styles.requestUsername, styles.usernameLink]}>{req.fromUsername || req.from}</Text>
                       </TouchableOpacity>
                       <Text style={styles.requestTime}>
@@ -902,7 +957,8 @@ const renderNotificationText = (notification) => {
                 )}
                 showsVerticalScrollIndicator={false}
               />
-            )}
+            );
+            })()}
           </View>
         </TouchableOpacity>
       </Modal>

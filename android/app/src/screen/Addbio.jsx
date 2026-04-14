@@ -1,4 +1,4 @@
-import { StyleSheet, Text, FlatList, View, TextInput, StatusBar, Alert, ActivityIndicator } from 'react-native'
+import { StyleSheet, Text, ScrollView, View, TextInput, StatusBar, Alert, ActivityIndicator } from 'react-native'
 import { useState } from 'react'
 import React from 'react'
 import { TouchableOpacity } from 'react-native';
@@ -8,8 +8,6 @@ import { Platform } from 'react-native';
 import { useEffect } from 'react';
 import Icon from 'react-native-vector-icons/Ionicons';
 import { useNavigation } from '@react-navigation/native';
-
-const currentUser = auth().currentUser;
 
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 
@@ -24,6 +22,12 @@ const Addbio = () => {
   useEffect(() => {
     const fetchProfile = async () => {
       try {
+        if (!currentUser?.uid) {
+          Alert.alert('Session Error', 'Please sign in again.');
+          navigation.goBack();
+          return;
+        }
+
         const doc = await Firestore().collection('profile').doc(currentUser.uid).get();
         if (doc.exists) {
           const data = doc.data();
@@ -75,10 +79,15 @@ const Addbio = () => {
         }
       }
 
-      const doc = await Firestore().collection('profile').doc(currentUser.uid).update({
+      if (!currentUser?.uid) {
+        Alert.alert('Session Error', 'Please sign in again.');
+        return;
+      }
+
+      await Firestore().collection('profile').doc(currentUser.uid).set({
         bio: bio,
         website: tech
-      });
+      }, { merge: true });
       Alert.alert('Success', 'Bio and Tech updated successfully');
     } catch (error) {
       Alert.alert('Error', 'Error updating bio and tech');
@@ -194,13 +203,16 @@ const Addbio = () => {
         </View>
         
       </View>
-      <FlatList
-        data={sections}
-        renderItem={({ item }) => item.render()}
-        keyExtractor={item => item.key}
+      <ScrollView
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
-      />
+      >
+        {sections.map(section => (
+          <View key={section.key}>
+            {section.render()}
+          </View>
+        ))}
+      </ScrollView>
       <View style={styles.floatingButtonContainer}>
         <TouchableOpacity 
           style={styles.saveButton} 
@@ -223,7 +235,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 20,
     zIndex: 10,
-    flex:'row',
+    // flex:'row',
   },
   backButtonText: {
     color: 'white',

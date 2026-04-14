@@ -42,6 +42,39 @@ async function ensureProfileExists(userId) {
   return profileDoc.data();
 }
 
+/**
+ * Parse object path from a Firebase Storage download URL (v0 API), or null.
+ */
+function storagePathFromFirebaseDownloadUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  const match = url.match(/\/o\/([^?]+)/);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove the previous avatar file from Storage when it is under avatars/{userId}/.
+ * Skips external URLs and placeholders.
+ */
+async function deletePreviousAvatarStorageObjectIfOwned(oldUrl, userId) {
+  const path = storagePathFromFirebaseDownloadUrl(oldUrl);
+  if (!path || !path.startsWith(`avatars/${userId}/`)) {
+    return;
+  }
+  try {
+    await admin.storage().bucket().file(path).delete();
+    console.log(`[deletePreviousAvatarStorageObjectIfOwned] Deleted ${path}`);
+  } catch (e) {
+    const code = e && (e.code || e.statusCode);
+    if (code === 404) return;
+    console.warn('[deletePreviousAvatarStorageObjectIfOwned]', path, e.message || e);
+  }
+}
+
 // ---------- HIGH PRIORITY ----------
 
 /**
@@ -835,6 +868,12 @@ exports.onProfileAvatarUpdate = onDocumentUpdated('profile/{userId}', async (eve
 
   const userId = event.params.userId;
   const newAvatar = after.avatar || null;
+  const oldAvatar = before?.avatar;
+
+  if (oldAvatar && oldAvatar !== newAvatar) {
+    await deletePreviousAvatarStorageObjectIfOwned(oldAvatar, userId);
+  }
+
   const firestore = admin.firestore();
 
   console.log(`[onProfileAvatarUpdate] Avatar changed for: ${userId}`);

@@ -6,6 +6,7 @@ import firestore from '@react-native-firebase/firestore';
 import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
 import { Platform, StatusBar } from 'react-native';
 import {requestcamerapermission,requestgallerypermission} from '../../utils/permissions';
+import { ActivityIndicator } from 'react-native';
 
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0: 0;
 
@@ -16,6 +17,7 @@ const Answer = () => {
   const question = route.params?.question;
   const isReply = route.params?.isreply || false;
   const answerToReply = route.params?.replytouser || null;
+  const [isPosting,setIsPosted]=useState(false);
   
   const { 
     profile, 
@@ -65,6 +67,7 @@ const handleSubmitAnswer = async () => {
   }
 
   try {
+    setIsPosted(true);
     const newAnswer = {
       id: Date.now().toString(),
       content: answerContent,
@@ -132,6 +135,7 @@ const submitReplyToAnswer = async () => {
   }
 
   try {
+    setIsPosted(true);
     const newReply = {
       id: `reply_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       content: answerContent,
@@ -215,8 +219,11 @@ const submitReplyToAnswer = async () => {
             <Text style={styles.cancelButton}>Cancel</Text>
           </TouchableOpacity>
           <Text style={styles.modalTitle}>{isReply ? 'Write Reply' : 'Write Answer'}</Text>
-          <TouchableOpacity onPress={handleSubmitAnswer}>
-            <Text style={styles.submitButton}>Post</Text>
+          <TouchableOpacity onPress={handleSubmitAnswer} disabled={isPosting}>
+            {isPosting
+            ?<ActivityIndicator size="small" color="white"/>
+             :<Text style={styles.submitButton}>Post</Text>
+            }
           </TouchableOpacity>
         </View>
 
@@ -258,7 +265,7 @@ const submitReplyToAnswer = async () => {
           <Text style={styles.sectionLabel}>Code Snippet (Optional)</Text>
           <TextInput
             style={styles.codeInput}
-            placeholder="// Your code here"
+            placeholder="Your code here"
             placeholderTextColor="#999"
             value={answerCode}
             onChangeText={setAnswerCode}
@@ -268,7 +275,7 @@ const submitReplyToAnswer = async () => {
 
           <View style={styles.attachmentSection}>
             <TouchableOpacity style={styles.imageButton} onPress={selectImage}>
-              <Text style={styles.imageButtonText}>📷 Attach Image</Text>
+              <Text style={styles.imageButtonText}> Attach Image</Text>
             </TouchableOpacity>
             {selectedImage && (
               <View>
@@ -293,7 +300,7 @@ export default Answer;
 const styles = StyleSheet.create({
   modalContainer: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: '#1e1e1e',
   },
   statusBarSpacer: { 
     height: getStatusBarHeight(), 
@@ -305,21 +312,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 16,
     paddingVertical: 12,
-    backgroundColor: '#fff',
+    backgroundColor: '#1e1e1e',
     borderBottomWidth: 1,
-    borderBottomColor: '#e0e0e0',
+    borderBottomColor: '#1e1e1e',
   },
   modalTitle: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#333',
+    color: 'white',
   },
   cancelButton: {
-    color: '#999',
+    color: 'white',
     fontSize: 16,
   },
   submitButton: {
-    color: '#007AFF',
+    color: 'white',
     fontSize: 16,
     fontWeight: '600',
   },
@@ -328,7 +335,7 @@ const styles = StyleSheet.create({
     padding: 16,
   },
   questionPreview: {
-    backgroundColor: '#f8f8f8',
+    backgroundColor: '#1e1e1e',
     padding: 12,
     borderRadius: 8,
     marginBottom: 16,
@@ -346,16 +353,16 @@ const styles = StyleSheet.create({
   },
   questionPreviewLabel: {
     fontSize: 12,
-    color: '#666',
+    color: 'white',
     marginBottom: 4,
   },
   questionPreviewTitle: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#333',
+    color: 'white',
   },
   contentInput: {
-    backgroundColor: '#fff',
+    backgroundColor: '#1e1e1e',
     borderRadius: 12,
     padding: 16,
     fontSize: 14,
@@ -364,16 +371,17 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
     borderWidth: 1,
     borderColor: '#e0e0e0',
+    color:'white'
   },
   sectionLabel: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#333',
+    color: 'white',
     marginBottom: 8,
     marginTop: 8,
   },
   codeInput: {
-    backgroundColor: '#f8f8f8',
+    backgroundColor: '#1e1e1e',
     borderRadius: 12,
     padding: 16,
     fontSize: 12,
@@ -383,12 +391,13 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
     borderWidth: 1,
     borderColor: '#e0e0e0',
+    color:'white'
   },
   attachmentSection: {
     marginTop: 16,
   },
   imageButton: {
-    backgroundColor: '#fff',
+    backgroundColor: '#1e1e1e',
     borderRadius: 12,
     padding: 16,
     alignItems: 'center',
@@ -397,7 +406,7 @@ const styles = StyleSheet.create({
     borderStyle: 'dashed',
   },
   imageButtonText: {
-    color: '#666',
+    color: 'white',
     fontSize: 14,
   },
   selectedImage: {

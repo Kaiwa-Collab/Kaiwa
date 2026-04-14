@@ -7,6 +7,7 @@ import functions from '@react-native-firebase/functions';
 import axios from 'axios';
 import { WS_SERVER_URL } from '../src/config/server_url';
 import { API_BASE_URL } from '../src/config/server_url';
+import chatSQLiteService from './chatSQLiteService';
 
 // ============================================================================
 // LRU CACHE
@@ -96,7 +97,11 @@ class WebSocketChatService {
 
     this.heartbeatInterval = null;
     this.lastPongTime = null;
+    this.lastActivityTime = null;
     this.reconnectTimeout = null;
+    this.handlersBound = false;
+    this.socketAnyListener = null;
+    this.lastReceivedMessageIds = new Map(); 
   }
 
   // ============================================================================
@@ -256,6 +261,7 @@ class WebSocketChatService {
           this.reconnectAttempts = 0;
           this.lastConnectionError = null;
           this.lastPongTime = Date.now();
+          this.lastActivityTime = Date.now();
         });
 
         this.socket.on('authenticated', (data) => {
@@ -328,11 +334,14 @@ class WebSocketChatService {
           console.log('✅ RECONNECTED (attempt', attemptNumber, ')');
           this.reconnectAttempts = 0;
           this.connectionState = 'connected';
-          this.notifyListeners('reconnected', { attemptNumber });
+          this.isConnected = true;        // ← add this
+  this.isAuthenticated = true; 
+          this.notifyListeners('reconnected', { attemptNumber, connected: true });
         });
 
         this.socket.on('pong', () => {
           this.lastPongTime = Date.now();
+          this.lastActivityTime = Date.now();
         });
       });
 
@@ -428,11 +437,21 @@ class WebSocketChatService {
     if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
     this.heartbeatInterval = setInterval(() => {
       if (this.isConnected && this.socket) {
-        const timeSinceLastPong = this.lastPongTime ? Date.now() - this.lastPongTime : null;
-        if (timeSinceLastPong && timeSinceLastPong > 90000) {
-          console.warn('⚠️ CONNECTION APPEARS STALE - forcing reconnection');
-          this.socket.disconnect();
-          setTimeout(() => this.socket.connect(), 1000);
+        const now = Date.now();
+        const timeSinceLastPong = this.lastPongTime ? now - this.lastPongTime : null;
+        const timeSinceLastActivity = this.lastActivityTime ? now - this.lastActivityTime : null;
+
+        // Avoid aggressively self-disconnecting healthy sockets.
+        // Socket.IO already has built-in heartbeat/reconnect handling.
+        if (
+          timeSinceLastPong &&
+          timeSinceLastPong > 180000 &&
+          (!timeSinceLastActivity || timeSinceLastActivity > 180000)
+        ) {
+          console.warn('⚠️ CONNECTION APPEARS STALE - requesting reconnect');
+          if (this.socket.connected) {
+            this.socket.connect();
+          }
         }
       }
     }, 30000);
@@ -465,8 +484,43 @@ class WebSocketChatService {
 
   setupEventHandlers() {
     console.log('✅ Setting up event handlers');
+    if (!this.socket) return;
 
-    this.socket.on('new_message', (message) => this.notifyListeners('new_message', message));
+    if (this.handlersBound) {
+      this.socket.off('new_message');
+      this.socket.off('message_confirmed');
+      this.socket.off('message_error');
+      this.socket.off('messages_delivered');
+      this.socket.off('messages_read');
+      this.socket.off('user_typing');
+      this.socket.off('user_status_changed');
+      this.socket.off('chat_updated');
+      this.socket.off('user_joined_chat');
+      this.socket.off('user_left_chat');
+      this.socket.off('message_updated');
+      if (this.socketAnyListener) {
+        this.socket.offAny(this.socketAnyListener);
+      }
+    }
+
+     this.socket.on('new_message', (message) => {
+      if (message.id && message.chatId) {
+        this.lastReceivedMessageIds.set(message.chatId, message.id);
+         // ✅ Add to in-memory cache immediately (synchronously)
+    this.addMessageToCache(message.chatId, message);
+        chatSQLiteService.upsertIncomingMessage({
+          id: message.id,
+          chatId: message.chatId,
+          senderId: message.senderId,
+          text: message.text || null,
+          mediaUrl: message.imageUrl || message.videoUrl || null,
+          mediaType: message.messageType || 'text',  // ← guard added
+          createdAt: message.createdAt,
+        }).catch(e => console.warn('Background message save failed:', e?.message));
+      }
+      this.notifyListeners('new_message', message);
+    });
+    
     this.socket.on('message_confirmed', (data) => this.notifyListeners('message_confirmed', data));
     this.socket.on('message_error', (data) => this.notifyListeners('message_error', data));
     this.socket.on('messages_delivered', (data) => this.notifyListeners('messages_delivered', data));
@@ -482,6 +536,11 @@ class WebSocketChatService {
     this.socket.on('user_joined_chat', (data) => this.notifyListeners('user_joined_chat', data));
     this.socket.on('user_left_chat', (data) => this.notifyListeners('user_left_chat', data));
     this.socket.on('message_updated', (data) => this.notifyListeners('message_updated', data));
+    this.socketAnyListener = () => {
+      this.lastActivityTime = Date.now();
+    };
+    this.socket.onAny(this.socketAnyListener);
+    this.handlersBound = true;
   }
 
   // ============================================================================
@@ -491,7 +550,16 @@ class WebSocketChatService {
   cleanupSocket() {
     if (this.heartbeatInterval) { clearInterval(this.heartbeatInterval); this.heartbeatInterval = null; }
     if (this.reconnectTimeout) { clearTimeout(this.reconnectTimeout); this.reconnectTimeout = null; }
-    if (this.socket) { this.socket.removeAllListeners(); this.socket.disconnect(); this.socket = null; }
+    if (this.socket) {
+      if (this.socketAnyListener) {
+        this.socket.offAny(this.socketAnyListener);
+      }
+      this.socket.removeAllListeners();
+      this.socket.disconnect();
+      this.socket = null;
+    }
+    this.handlersBound = false;
+    this.socketAnyListener = null;
   }
 
   disconnect() {
@@ -509,8 +577,11 @@ class WebSocketChatService {
   }
 
   joinChat(chatId) {
-    if (!this.socket || !this.isConnected) {
-      console.warn('⚠️ Socket not connected, queueing join_chat');
+    // Important: the server may require authentication before it honors `join_chat`.
+    // Queue joins until we are both connected AND authenticated, otherwise joins can be "lost"
+    // (join emitted too early) and the receiver won't get `new_message` events until reopen.
+    if (!this.socket || !this.isConnected || !this.isAuthenticated) {
+      console.warn('⚠️ Socket not ready (connected/auth), queueing join_chat');
       this.pendingOperations.push(() => this.joinChat(chatId));
       return;
     }
@@ -518,50 +589,114 @@ class WebSocketChatService {
   }
 
   leaveChat(chatId) {
-    if (!this.socket || !this.isConnected) return;
+    if (!this.socket || !this.isConnected || !this.isAuthenticated) return;
     this.socket.emit('leave_chat', { chatId });
   }
 
   async sendMessage(chatId, senderId, text, mediaUrl = null, mediaType = null) {
-    const authReady = await this.waitForSocketAuth();
-    if (!authReady) throw new Error('Not authenticated - please try again');
-    if (!this.socket || !this.isConnected) throw new Error('Socket not connected - please check your connection');
+  const tempId = `temp_${Date.now()}_${Math.random()}`;
 
-    const tempId = `temp_${Date.now()}_${Math.random()}`;
+  // ── Step 1: SQLite write first, always, before any network check ──
+  await chatSQLiteService.saveOptimisticMessage({
+    chatId, senderId, text, mediaUrl, mediaType, tempId,
+  });
 
-   return new Promise((resolve, reject) => {
-  const confirmListener = (data) => {
-    if (data.tempId === tempId) {
-      cleanup();
-      resolve({ tempId, message: data.message });
-    }
+  const resolvedMessageType = mediaUrl && mediaType ? mediaType : 'text';
+  const optimisticMessage = {
+    id: tempId,
+    senderId,
+    text: resolvedMessageType === 'text' ? text : null,
+    messageType: resolvedMessageType,
+    imageUrl: resolvedMessageType === 'image' ? mediaUrl : null,
+    videoUrl: resolvedMessageType === 'video' ? mediaUrl : null,
+    createdAt: new Date().toISOString(),
+    readBy: { [senderId]: new Date().toISOString() },
+    deliveredTo: {},
+    edited: false,
+    status: 'sending',
+    tempId,
   };
 
-  const errorListener = (data) => {
-    if (data.tempId === tempId) {
-      cleanup();
-      reject(new Error(data.error));
-    }
-  };
+  // ── Step 2: attempt send — queue if offline ──
+  const ackPromise = this._sendOrQueue({ chatId, text, mediaUrl, mediaType, tempId });
 
-  const timeout = setTimeout(() => {
-    cleanup();
-    reject(new Error('Message send timeout - please check your connection'));
-  }, 30000);
+  return { tempId, optimisticMessage, ackPromise };
+}
 
-  const cleanup = () => {
-    clearTimeout(timeout);
-    this.removeListener('message_confirmed', confirmListener);
-    this.removeListener('message_error', errorListener);
-  };
-
-  this.addListener('message_confirmed', confirmListener);
-  this.addListener('message_error', errorListener);
-
-  this.socket.emit('send_message', { chatId, text, mediaUrl, mediaType, tempId });
-});
+// Decides immediately: send now or queue for later
+_sendOrQueue({ chatId, text, mediaUrl, mediaType, tempId }) {
+  // Check synchronously — no await, no delay
+  if (this.isAuthenticated && this.isConnected && this.socket) {
+    // Online right now — emit immediately
+    return this._emitAndAwaitAck({ chatId, text, mediaUrl, mediaType, tempId });
   }
 
+  // Offline — queue and return a promise that resolves when sent later
+  console.log('📦 Offline — queuing:', tempId);
+  return new Promise((resolve, reject) => {
+    this.pendingOperations.push(() => {
+      this._emitAndAwaitAck({ chatId, text, mediaUrl, mediaType, tempId })
+        .then(resolve)
+        .catch(reject);
+    });
+  });
+}
+
+_emitAndAwaitAck({ chatId, text, mediaUrl, mediaType, tempId }) {
+  return new Promise((resolve, reject) => {
+
+    const confirmListener = (data) => {
+      if (data?.tempId !== tempId) return;
+      cleanup();
+
+      const serverId = data?.message?.id || data?.serverId;
+      const createdAtVal = data?.message?.createdAt ?? data?.serverTs;
+      let serverTsMs = Date.now();
+      if (typeof createdAtVal === 'number') {
+        serverTsMs = createdAtVal;
+      } else if (typeof createdAtVal === 'string') {
+        const parsed = new Date(createdAtVal).getTime();
+        if (!Number.isNaN(parsed)) serverTsMs = parsed;
+      } else if (createdAtVal?.toDate) {
+        serverTsMs = createdAtVal.toDate().getTime();
+      }
+
+      if (serverId) {
+        chatSQLiteService
+          .confirmMessage({ tempId, serverId, serverTs: serverTsMs })
+          .catch(e => console.error('SQLite confirmMessage failed:', e?.message));
+      }
+
+      resolve({ tempId, message: data.message });
+    };
+
+    const errorListener = (data) => {
+      if (data?.tempId !== tempId) return;
+      cleanup();
+      // Server explicitly rejected — mark failed so UI shows retry button
+      chatSQLiteService.markMessageFailed(tempId).catch(() => {});
+      reject(new Error(data.error || 'Failed to send message'));
+    };
+
+    const timeout = setTimeout(() => {
+      cleanup();
+      // Timeout — do NOT mark failed, keep as sending for reconnect retry
+      console.warn('⏱ ACK timeout for', tempId, '— keeping as pending');
+      reject(new Error('timeout'));
+    }, 30000);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      this.removeListener('message_confirmed', confirmListener);
+      this.removeListener('message_error', errorListener);
+    };
+
+    this.addListener('message_confirmed', confirmListener);
+    this.addListener('message_error', errorListener);
+
+    this.socket.emit('send_message', { chatId, text, mediaUrl, mediaType, tempId });
+  });
+}
   // ============================================================================
   // CACHE METHODS
   // ============================================================================
@@ -577,17 +712,31 @@ class WebSocketChatService {
   return Date.now() - ts;
 }
 
-  addMessageToCache(chatId, message) {
-    
-    if (!chatId || !message?.id) return;
-      const MAX_MESSAGES = 100;
-    const cached = this.messageCache.get(chatId) || [];
-    const exists = cached.some(m => m.id === message.id);
-    const updated = exists
-      ? cached.map(m => m.id === message.id ? message : m)
-      : [message, ...cached];
-    this.messageCache.set(chatId, updated.slice(0,MAX_MESSAGES));
+
+getLastReceivedMessageId(chatId) {
+  return this.lastReceivedMessageIds.get(chatId) || null;
+}
+
+ addMessageToCache(chatId, message) {
+  if (!chatId || !message?.id) return;
+  const MAX_MESSAGES = 100;
+  const cached = this.messageCache.get(chatId) || [];
+  const exists = cached.some(m => m.id === message.id);
+  const updated = exists
+    ? cached.map(m => m.id === message.id ? message : m)
+    : [message, ...cached];
+
+  // ✅ Write directly to the internal map to avoid resetting the cache timestamp.
+  // getCacheAge() tracks when a full history fetch last ran — not individual messages.
+  // Resetting the timestamp here would cause shouldSkipFetch to wrongly skip
+  // the background network sync on the next screen open.
+  const existing = this.messageCache.cache.get(chatId);
+  if (existing) {
+    existing.value = updated.slice(0, MAX_MESSAGES);
+  } else {
+    this.messageCache.set(chatId, updated.slice(0, MAX_MESSAGES));
   }
+}
 
   updateMessageInCache(chatId, message) {
     if (!chatId || !message?.id) return;
@@ -699,6 +848,15 @@ appendOlderMessagesToCache(chatId, olderMessages) {
   generateGroupChatId() {
     return `group_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
+
+  onConnectionChange(callback) {
+  this.addListener('connection_status', callback);
+  this.addListener('reconnected', callback);
+  return () => {
+    this.removeListener('connection_status', callback);
+    this.removeListener('reconnected', callback);
+  };
+}
 }
 
 const wsChatService = new WebSocketChatService();

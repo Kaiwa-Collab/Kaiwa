@@ -13,6 +13,7 @@ import { useUserData } from '../users';
 import storage from '@react-native-firebase/storage'
 import { launchImageLibrary } from 'react-native-image-picker';
 import { requestcamerapermission, requestgallerypermission } from '../../utils/permissions';
+import functions from '@react-native-firebase/functions';
 
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 
@@ -30,6 +31,9 @@ export default function ChatInfo({ route, navigation }) {
   const [projectCompletionDate, setProjectCompletionDate] = useState(null);
   const [participantsExpanded, setParticipantsExpanded] = useState(false);
   const [participantsList, setParticipantsList] = useState([]);
+  const [pendingGithubUsers, setPendingGithubUsers] = useState([]);
+const [resendingMail, setResendingMail] = useState({});
+const [resendCooldowns, setResendCooldowns] = useState({});
 
   // Normalize both casing variants: groupAvatar (camelCase) and groupavatar (lowercase)
   const [groupAvatar, setGroupAvatar] = useState(
@@ -40,7 +44,9 @@ export default function ChatInfo({ route, navigation }) {
   const currentUserUid = auth().currentUser.uid;
   const { getCachedImageUri, cacheImage } = useUserData();
 
-  const isCreator = chatData?.createdBy === currentUserUid;
+  const isCreator = 
+  chatData?.createdBy === currentUserUid || 
+  chatData?.creatorId === currentUserUid;
   const showdonebutton = isCreator && !projectcompleted;
   const displaytitle = chatTitle || 'Chat';
 
@@ -231,6 +237,24 @@ export default function ChatInfo({ route, navigation }) {
     }
   };
 
+  const handleResendGithubInvite = async (user) => {
+  setResendingMail(prev => ({ ...prev, [user.id]: true }));
+  try {
+    await functions()
+      .httpsCallable('resendGithubInvite')({ userId: user.id, chatId });
+    setResendCooldowns(prev => ({ ...prev, [user.id]: Date.now() + 10 * 60 * 1000 }));
+    Alert.alert('Sent', `GitHub invite resent to ${user.name}`);
+  } catch (error) {
+    const msg = error?.message || 'Failed to resend invite';
+    if (msg.includes('not connected')) {
+      Alert.alert('Error', `${user.name} has not connected their GitHub account yet`);
+    } else {
+      Alert.alert('Error', msg);
+    }
+  } finally {
+    setResendingMail(prev => ({ ...prev, [user.id]: false }));
+  }
+};
   useEffect(() => {
     checkProjectStatus();
   }, [chatId, chatData?.type]);
@@ -240,6 +264,52 @@ export default function ChatInfo({ route, navigation }) {
       checkProjectStatus();
     }, [chatId, chatData?.type])
   );
+
+  useEffect(() => {
+  if (chatData?.type !== 'group' || !isCreator || !chatId) return;
+
+  const fetchPendingGithubUsers = async () => {
+    try {
+      const projectsSnapshot = await firestore()
+        .collection('collaborations')
+        .where('chatId', '==', chatId)
+        .get();
+
+      if (projectsSnapshot.empty) return;
+
+      const projectData = projectsSnapshot.docs[0].data();
+      const pendingIds = projectData.pendingGitHubAcceptance || [];
+
+      if (pendingIds.length === 0) {
+        setPendingGithubUsers([]);
+        return;
+      }
+
+      // Fetch profiles for pending users in parallel
+      const profileSnaps = await Promise.all(
+        pendingIds.map(uid => firestore().collection('profile').doc(uid).get())
+      );
+
+      
+
+      const pendingUsers = profileSnaps.map((snap, i) => ({
+        id: pendingIds[i],
+        name: snap.exists
+          ? (snap.data()?.name || snap.data()?.displayName || snap.data()?.username || 'Unknown')
+          : 'Unknown',
+        avatar: snap.exists ? (snap.data()?.avatar || null) : null,
+      }));
+
+      setPendingGithubUsers(pendingUsers);
+    } catch (error) {
+      console.error('Error fetching pending github users:', error);
+    }
+  };
+
+  fetchPendingGithubUsers();
+}, [chatId, isCreator, chatData?.type]);
+
+
 
   return (
     <SafeAreaView style={styles.container}>
@@ -399,8 +469,49 @@ export default function ChatInfo({ route, navigation }) {
                 ))}
               </View>
             )}
+
+      
+
           </View>
         )}
+
+              {isCreator && pendingGithubUsers.length > 0 && (
+  <View style={styles.pendingGithubSection}>
+    <Text style={styles.pendingGithubTitle}>
+      Pending GitHub Acceptance ({pendingGithubUsers.length})
+    </Text>
+    {pendingGithubUsers.map(user => (
+      <View key={user.id} style={styles.pendingGithubItem}>
+        <View style={styles.participantAvatarContainer}>
+          {user.avatar ? (
+            <Image
+              source={{ uri: getCachedImageUri(user.avatar) }}
+              style={styles.participantAvatar}
+            />
+          ) : (
+            <EmptydP size={40} initials={user.name.charAt(0).toUpperCase()} />
+          )}
+        </View>
+        <View style={styles.pendingGithubInfo}>
+          <Text style={styles.participantName}>{user.name}</Text>
+          <Text style={styles.pendingGithubStatus}>GitHub invite pending</Text>
+        </View>
+        <TouchableOpacity
+  style={[
+    styles.resendButton,
+    (resendingMail[user.id] || resendCooldowns[user.id] > Date.now()) && styles.resendButtonDisabled
+  ]}
+  onPress={() => handleResendGithubInvite(user)}
+  disabled={resendingMail[user.id] || resendCooldowns[user.id] > Date.now()}
+>
+  <Text style={styles.resendButtonText}>
+    {resendingMail[user.id] ? 'Sending...' : 'Resend'}
+  </Text>
+</TouchableOpacity>
+      </View>
+    ))}
+  </View>
+)}
 
         {(chatData?.type === 'group' ? isCreator : true) && (
           <TouchableOpacity
@@ -667,4 +778,51 @@ const styles = StyleSheet.create({
     height: getStatusBarHeight(),
     backgroundColor: '#1e1e1e',
   },
+
+  pendingGithubSection: {
+  width: '100%',
+  marginTop: 8,
+  marginBottom: 8,
+  backgroundColor: '#1e1e1e',
+  borderWidth: 1,
+  borderColor: 'rgba(255, 193, 7, 0.4)',
+  borderRadius: 1,
+},
+pendingGithubTitle: {
+  color: '#FFC107',
+  fontWeight: 'bold',
+  fontSize: 14,
+  padding: 15,
+  borderBottomWidth: 0.5,
+  borderBottomColor: 'rgba(255, 193, 7, 0.3)',
+},
+pendingGithubItem: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  padding: 12,
+  borderBottomWidth: 0.5,
+  borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+},
+pendingGithubInfo: {
+  flex: 1,
+},
+pendingGithubStatus: {
+  color: '#FFC107',
+  fontSize: 12,
+  marginTop: 2,
+},
+resendButton: {
+  backgroundColor: '#4e9bde',
+  paddingHorizontal: 12,
+  paddingVertical: 6,
+  borderRadius: 6,
+},
+resendButtonDisabled: {
+  opacity: 0.5,
+},
+resendButtonText: {
+  color: 'white',
+  fontSize: 12,
+  fontWeight: '600',
+},
 });

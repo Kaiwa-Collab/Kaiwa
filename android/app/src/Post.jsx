@@ -9,12 +9,12 @@ import { Dimensions } from 'react-native';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 
-const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLikedBy = [], createdAt, postsId,userId }) => {
+const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLikedBy = [], createdAt, postsId,userId,commentCount = 0  }) => {
   const [starred, setStarred] = useState(false);
   const [starCount, setStarCount] = useState(initialLikeCount || 0);
   const [updating, setUpdating] = useState(false);
   const [liveAvatar, setLiveAvatar] = useState(Avatar);
-
+   const [liveCommentCount, setLiveCommentCount] = useState(commentCount);
   const actualPostId = postsId;
   const navigation = useNavigation();
   const { currentUser } = useUserData();
@@ -25,6 +25,9 @@ const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLiked
     if (Avatar) setLiveAvatar(Avatar);
   }, [Avatar]);
 
+  useEffect(() => {
+  setLiveCommentCount(commentCount);
+}, [commentCount]);
   // ONE-TIME read on mount — no persistent listener
   // Eliminates 400 snapshot listeners for 20 users x 20 posts
   // useEffect(() => {
@@ -51,8 +54,9 @@ const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLiked
   const formatPostDate = (timestamp) => {
     if (!timestamp) return '';
     const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
     const now = new Date();
-    const diffInSeconds = Math.floor((now - date) / 1000);
+    const diffInSeconds = Math.max(0, Math.floor((now - date) / 1000));
     if (diffInSeconds < 60) return `${diffInSeconds} seconds ago`;
     if (diffInSeconds < 3600) {
       const minutes = Math.floor(diffInSeconds / 60);
@@ -129,7 +133,10 @@ const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLiked
     navigation.navigate('CommentScreen', {
       postId: actualPostId,
       image: image,
-      name: name
+      name: name,
+      // Count is driven only by onCommentCountSync (Firestore snapshot length).
+      // Avoid optimistic +/-1 here — it races the snapshot and can show e.g. 2 then 1.
+      onCommentCountSync: (exactCount) => setLiveCommentCount(exactCount),
     });
   };
 
@@ -138,6 +145,21 @@ const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLiked
     navigation.navigate('Profile', { screen: 'Profile', params: { userId } });
   }
 };
+
+// Add this effect inside Post component
+useEffect(() => {
+  const unsubscribe = navigation.addListener('focus', () => {
+    // When returning from CommentScreen, pick up the synced count
+    const state = navigation.getState();
+    const commentScreenRoute = state?.routes?.find(
+      r => r.name === 'CommentScreen' && r.params?.postId === actualPostId
+    );
+    if (commentScreenRoute?.params?.syncedCommentCount !== undefined) {
+      setLiveCommentCount(commentScreenRoute.params.syncedCommentCount);
+    }
+  });
+  return unsubscribe;
+}, [navigation, actualPostId]);
 
   return (
     <View style={styles.container}>
@@ -189,6 +211,7 @@ const Post = ({ name, image, Avatar, caption, initialLikeCount = 0, initialLiked
         <TouchableOpacity onPress={navigateToComments} style={{ marginLeft: 20 }}>
           <Icon name="comment-o" size={22} color="white" />
         </TouchableOpacity>
+        <Text style={styles.starCount}> {liveCommentCount > 0 ? liveCommentCount : ''}</Text> 
       </View>
 
       <View style={styles.date}>

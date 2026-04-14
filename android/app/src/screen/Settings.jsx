@@ -14,6 +14,7 @@ const Settings = () => {
   const navigation = useNavigation();
   const [loading, setLoading] = useState(false);
   const [isPrivate, setIsPrivate] = useState(false);
+  
 
   useEffect(() => {
     const loadPrivacySetting = async () => {

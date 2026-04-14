@@ -8,6 +8,7 @@ import firestore from '@react-native-firebase/firestore';
 import signUp_G from './signUp_G';
 import presenceService from './presenceService';
 import wsChatService from '../../service/wsChatService';// ADD THIS IMPORT
+import SettingsStack from '../SettingsStack';
 
 import HomeScreen from './HomeScreen';
 import SignUp from './SignUp';
@@ -15,10 +16,11 @@ import Tabnavigator from './Tabnavigator';
 import { NotificationsProvider } from '../NotificationsContext';
 import ChatScreen from './ChatScreen';
 import CommentScreen from './CommentScreen';
-import Settings from './Settings';
+// import Settings from './Settings';
 import Username from './Username';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import MessageRequestsScreen from './MessageRequestsScreen';
+// import SettingsStack from '../SettingsStack';
 
 const Stack = createNativeStackNavigator();
 
@@ -68,7 +70,7 @@ function AppNavigator({ user, hasUsername }) {
               </>
             )}
             <Stack.Screen name="ChatScreen" component={ChatScreen} />
-            <Stack.Screen name="Settings" component={Settings} />
+            <Stack.Screen name="Settings" component={SettingsStack} />
             <Stack.Screen
               name="CommentScreen"
               component={CommentScreen}

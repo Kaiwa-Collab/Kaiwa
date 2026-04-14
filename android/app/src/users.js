@@ -8,6 +8,14 @@ import functions from '@react-native-firebase/functions';
 
 const UserDataContext = createContext();
 
+const parsePostTime = (post) => {
+  const value = post?.timestamp || post?.createdAt || null;
+  if (!value) return 0;
+  if (value?.toDate) return value.toDate().getTime();
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
 export const UserProvider = ({ children }) => {
   const [profile, setProfile] = useState(null);
   const [posts, setPosts] = useState([]);
@@ -383,11 +391,12 @@ export const UserProvider = ({ children }) => {
 };
 
 
- const fetchFollowingPostsOptimized = async (useCache = true) => {
+ const fetchFollowingPostsOptimized = async (useCache = true, options = {}) => {
   if (!currentUser || isFetchingPosts.current) return;
+  const { sinceTimestamp = null } = options;
 
   // Try cache first
-  if (useCache) {
+  if (useCache && !sinceTimestamp) {
     const cached = await loadPostsFromCache();
     if (cached && cached.length > 0) {
       setFollowingPosts(cached);
@@ -406,7 +415,8 @@ export const UserProvider = ({ children }) => {
     const getFollowingpost = functions().httpsCallable('getFollowingpost');
     const result = await getFollowingpost({ 
       type: 'posts',
-      limit: 30 
+      limit: 30,
+      ...(sinceTimestamp ? { sinceTimestamp } : {})
     });
     
     const posts = result.data.items.map(p => ({
@@ -415,8 +425,17 @@ export const UserProvider = ({ children }) => {
       timestamp: new Date(p.timestamp)
     }));
 
-    setFollowingPosts(posts);
-    await savePostsToCache(posts);
+    let mergedPosts = [];
+    setFollowingPosts(prev => {
+      const existing = prev || [];
+      const map = new Map();
+      [...existing, ...posts].forEach((item, idx) => {
+        map.set(item?.id || `fallback_${idx}`, item);
+      });
+      mergedPosts = [...map.values()].sort((a, b) => parsePostTime(b) - parsePostTime(a));
+      return mergedPosts;
+    });
+    await savePostsToCache(mergedPosts.length > 0 ? mergedPosts : posts);
     lastPostsFetch.current = Date.now();
 
     // Cache images in background
@@ -569,7 +588,7 @@ export const UserProvider = ({ children }) => {
     
     // Optimized fetch methods
     fetchTrendingQuestions,
-    refreshPostsFromFollowing: () => fetchFollowingPostsOptimized(false),
+    refreshPostsFromFollowing: (options = {}) => fetchFollowingPostsOptimized(false, options),
     refreshQuestions: (forceRefresh = false) => fetchFollowingQuestionsOptimized(!forceRefresh),
     
     // Image caching

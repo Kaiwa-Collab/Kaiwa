@@ -13,8 +13,8 @@ import {
   ActivityIndicator,
   Image,
   Alert,
-  SafeAreaView,
 } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import ConversationsScreen from './ConversationsScreen';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useUserData } from '../users';
@@ -37,6 +37,12 @@ const getStatusBarHeight = () => {
   return Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 };
 
+  const normalizeLastMessage = (msg) => {
+  if (!msg) return '';
+  if (typeof msg === 'string') return msg;
+  return `${msg.id || ''}|${msg.text || ''}|${msg.createdAt || ''}`;
+};
+
 // Helper function to deep compare arrays of objects
 const arraysEqual = (a, b) => {
   if (a.length !== b.length) return false;
@@ -46,7 +52,7 @@ const arraysEqual = (a, b) => {
     // Compare key properties that matter for UI updates
     return item.id === bItem.id &&
            item.conversationId === bItem.conversationId &&
-           item.lastMessage === bItem.lastMessage &&
+           normalizeLastMessage(item.lastMessage) === normalizeLastMessage(bItem.lastMessage) &&
            item.unreadCount === bItem.unreadCount &&
            item.isPinned === bItem.isPinned &&
            item.groupavatar === bItem.groupavatar &&
@@ -100,6 +106,9 @@ function CustomDrawerContent({ navigation }) {
     cacheImage,
     currentUser,
   } = useUserData();
+
+
+
 
   // Enhanced error handling for conversations loading
  const loadActiveConversations = useCallback (async () => {
@@ -194,14 +203,14 @@ function CustomDrawerContent({ navigation }) {
             prevConversationsRef.current = conversations;
             setActiveConversations(conversations);
           }
-          if (!requestsEqual(messageRequests.received || [], prevReceivedRequestsRef.current)) {
-            prevReceivedRequestsRef.current = messageRequests.received || [];
-            setReceivedRequests(messageRequests.received || []);
-          }
-          if (!requestsEqual(messageRequests.sent || [], prevPendingRequestsRef.current)) {
-            prevPendingRequestsRef.current = messageRequests.sent || [];
-            setPendingRequests(messageRequests.sent || []);
-          }
+          // if (!requestsEqual(messageRequests.received || [], prevReceivedRequestsRef.current)) {
+          //   prevReceivedRequestsRef.current = messageRequests.received || [];
+          //   setReceivedRequests(messageRequests.received || []);
+          // }
+          // if (!requestsEqual(messageRequests.sent || [], prevPendingRequestsRef.current)) {
+          //   prevPendingRequestsRef.current = messageRequests.sent || [];
+          //   setPendingRequests(messageRequests.sent || []);
+          // }
         },
         (err) => console.warn('[First.jsx] Aggregated listener error:', err)
       );
@@ -280,18 +289,18 @@ const handleRefresh = React.useCallback(() => {
   // Only refresh when drawer is actually reopened (not on every focus)
   useFocusEffect(
     React.useCallback(() => {
-      if (currentUser) {
-        // Only refresh if drawer was previously closed and is now opened
-        const wasClosed = prevDrawerFocusedRef.current === false && isFocused === true;
-        prevDrawerFocusedRef.current = isFocused;
+      // if (currentUser) {
+      //   // Only refresh if drawer was previously closed and is now opened
+      //   const wasClosed = prevDrawerFocusedRef.current === false && isFocused === true;
+      //   prevDrawerFocusedRef.current = isFocused;
         
-        if (wasClosed && drawerWasClosed) {
-          // Drawer was closed and is now reopened - refresh message requests
-          // The real-time listener on chats collection already handles conversation updates
-          loadMessageRequests();
-          setDrawerWasClosed(false);
-        }
-      }
+      //   if (wasClosed && drawerWasClosed) {
+      //     // Drawer was closed and is now reopened - refresh message requests
+      //     // The real-time listener on chats collection already handles conversation updates
+      //     loadMessageRequests();
+      //     setDrawerWasClosed(false);
+      //   }
+      // }
     }, [currentUser, isFocused, drawerWasClosed])
   );
 
@@ -316,47 +325,47 @@ const handleRefresh = React.useCallback(() => {
     // Subscribe to online status for each user in active conversations
   useEffect(() => {
     // Cleanup previous subscriptions
-    Object.values(statusUnsubscribesRef.current).forEach(unsubscribe => {
-      if (unsubscribe) unsubscribe();
-    });
-    statusUnsubscribesRef.current = {};
+    // Object.values(statusUnsubscribesRef.current).forEach(unsubscribe => {
+    //   if (unsubscribe) unsubscribe();
+    // });
+    // statusUnsubscribesRef.current = {};
 
-    // Subscribe to online status for each direct chat user
-    activeConversations.forEach(conversation => {
-      // Only track status for direct chats (not group chats)
-      if (conversation.type === 'direct') {
-        const currentUserId = currentUser?.uid || auth().currentUser?.uid;
-        let userId = null;
+    // // Subscribe to online status for each direct chat user
+    // activeConversations.forEach(conversation => {
+    //   // Only track status for direct chats (not group chats)
+    //   if (conversation.type === 'direct') {
+    //     const currentUserId = currentUser?.uid || auth().currentUser?.uid;
+    //     let userId = null;
         
-        // Extract user ID from conversationId (format: userId1_userId2)
-        if (conversation.conversationId && conversation.conversationId.includes('_')) {
-          const participants = conversation.conversationId.split('_').filter(id => id && id.length > 10);
-          userId = participants.find(id => id !== currentUserId);
-        }
+    //     // Extract user ID from conversationId (format: userId1_userId2)
+    //     if (conversation.conversationId && conversation.conversationId.includes('_')) {
+    //       const participants = conversation.conversationId.split('_').filter(id => id && id.length > 10);
+    //       userId = participants.find(id => id !== currentUserId);
+    //     }
 
-        // If we have a valid userId, subscribe to their status
-        if (userId && userId.length > 10) {
-          const unsubscribe = presenceService.subscribeToUserStatus(
-            userId,
-            (statusText) => {
-              setUserOnlineStatus(prev => ({
-                ...prev,
-                [userId]: statusText
-              }));
-            }
-          );
-          statusUnsubscribesRef.current[userId] = unsubscribe;
-        }
-      }
-    });
+    //     // If we have a valid userId, subscribe to their status
+    //     if (userId && userId.length > 10) {
+    //       const unsubscribe = presenceService.subscribeToUserStatus(
+    //         userId,
+    //         (statusText) => {
+    //           setUserOnlineStatus(prev => ({
+    //             ...prev,
+    //             [userId]: statusText
+    //           }));
+    //         }
+    //       );
+    //       statusUnsubscribesRef.current[userId] = unsubscribe;
+    //     }
+    //   }
+    // });
 
-    // Cleanup on unmount
-    return () => {
-      Object.values(statusUnsubscribesRef.current).forEach(unsubscribe => {
-        if (unsubscribe) unsubscribe();
-      });
-      statusUnsubscribesRef.current = {};
-    };
+    // // Cleanup on unmount
+    // return () => {
+    //   Object.values(statusUnsubscribesRef.current).forEach(unsubscribe => {
+    //     if (unsubscribe) unsubscribe();
+    //   });
+    //   statusUnsubscribesRef.current = {};
+    // };
   }, [activeConversations, currentUser]);
 
   // Enhanced search with better validation
@@ -632,8 +641,10 @@ if (cacheIsStale || newMessageSinceCache) {
     const isRequest = isReceivedRequest(user.id) || user.isMessageRequest;
     
     if (hasActiveChat) {
-      return user.lastMessage || user.bio || user.status || 'Tap to continue conversation...';
-    }
+  const lm = user.lastMessage;
+  const preview = typeof lm === 'string' ? lm : lm?.text || '';
+  return preview || user.bio || user.status || 'Tap to continue conversation...';
+}
     
     if (hasPending) {
       return 'Message request sent';
@@ -862,24 +873,24 @@ if (cacheIsStale || newMessageSinceCache) {
           <Text style={styles.title}>Conversations</Text>
           <View style={styles.headerActions}>
             {/* Show counts in header */}
-            {receivedRequests.length > 0 && (
+            {/* {receivedRequests.length > 0 && (
               <View style={styles.requestBadgeContainer}>
                 <Text style={styles.requestCount}>{receivedRequests.length}</Text>
               </View>
-            )}
-            <TouchableOpacity 
+            )} */}
+            {/* <TouchableOpacity 
               style={styles.iconButton} 
               onPress={() => navigation.navigate('MessageRequestsScreen')}
             >
               <Icon name="mail-outline" size={24} color="white" />
-            </TouchableOpacity>
+            </TouchableOpacity> */}
           </View>
         </View>
         <View style={styles.separator} />
       </View>
 
       {/* Search Bar */}
-      <View style={styles.searchContainer}>
+      {/* <View style={styles.searchContainer}>
         <View style={styles.searchInputContainer}>
           <TextInput
             style={styles.searchInput}
@@ -903,7 +914,7 @@ if (cacheIsStale || newMessageSinceCache) {
             </TouchableOpacity>
           )}
         </View>
-      </View>
+      </View> */}
 
       {/* Chat List */}
       <View style={styles.chatListContainer}>
