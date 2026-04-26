@@ -1028,6 +1028,10 @@ if (shouldSkipFetch) {
 
   const handleMediaSelection = async (type) => {
     setShowMediaPicker(false);
+    // Video sharing temporarily disabled.
+    if (type === 'video') {
+      return;
+    }
 
     const galleryPermission = await requestgallerypermission();
     if (!galleryPermission) {
@@ -1435,6 +1439,7 @@ const retryFailedMessage = useCallback(async (item) => {
       prevMessages.map(msg => msg.id === item.id ? deletedPlaceholder : msg)
     );
     wsChatService.updateMessageInCache(actualChatId, deletedPlaceholder);
+    await chatSQLiteService.markMessageDeleted(item.id, deletedPlaceholder.text).catch(() => {});
 
     try {
       if (item.imageUrl) {
@@ -1507,6 +1512,7 @@ const retryFailedMessage = useCallback(async (item) => {
         prevMessages.map(msg => (msg.id === item.id ? item : msg))
       );
       wsChatService.updateMessageInCache(actualChatId, item);
+      await chatSQLiteService.restoreMessageContent(item).catch(() => {});
       InteractionManager.runAfterInteractions(() => {
         Alert.alert('Error', 'Failed to delete message');
       });
@@ -1586,12 +1592,12 @@ const downloadMedia = async (item) => {
 };
 
 
-
-  // ─── Render message item ────────────────────────────────────────────────────
-  const renderItem = ({ item }) => {
+  
+const renderItem = ({ item }) => {
   // ── System / GitHub messages (unchanged) ──────────────────────────────────
   if (item.isSystemMessage || item.senderId === 'system' || item.senderId === 'github') {
     const isGitHubEvent = item.senderId === 'github' || item.type === 'github_event';
+    
     return (
       <View style={[styles.systemMessageContainer, isGitHubEvent && styles.githubMessageContainer]}>
         <View style={styles.systemMessageContent}>
@@ -1670,16 +1676,23 @@ const senderInfo = (!isUserMessage && isGroup) ? getSenderInfo(item.senderId) : 
           {/* ── Image message ──────────────────────────────────────────────── */}
           {item.messageType === 'image' && item.imageUrl && (
             <View style={styles.mediaWrapper}>
-              <Image
-                source={{ uri: getDisplayUri(item.imageUrl,item.id) }}
-                blurRadius={(!localPath && !isUserMessage) ? 50 : 0}
-                style={[
-                styles.messageImage,
-                 (!localPath && !isUserMessage) && { opacity: 0.8 }
-                  ]}
-                resizeMode="cover"
-                
-              />
+              <TouchableOpacity
+      activeOpacity={0.95}
+    onLongPress={() => handleLongPressMessage(item)}
+    onPress={() => {
+    // Only open viewer if image is accessible (own message or already downloaded)
+    if (isUserMessage || dlState === 'done') {
+      setMediaViewer({ visible: true, uri: getDisplayUri(item.imageUrl, item.id), type: 'image' });
+    }
+  }}
+    >
+      <Image
+        source={{ uri: getDisplayUri(item.imageUrl, item.id) }}
+        blurRadius={(!localPath && !isUserMessage) ? 50 : 0}
+        style={[styles.messageImage, (!localPath && !isUserMessage) && { opacity: 0.8 }]}
+        resizeMode="cover"
+      />
+    </TouchableOpacity>
 
               {/* Download overlay — hidden once downloaded */}
               {!isUserMessage && dlState !== 'done' && (
@@ -1711,16 +1724,24 @@ const senderInfo = (!isUserMessage && isGroup) ? getSenderInfo(item.senderId) : 
           {/* ── Video message ──────────────────────────────────────────────── */}
           {item.messageType === 'video' && item.videoUrl && (
             <View style={styles.mediaWrapper}>
-              <Video
-                source={{ uri: getDisplayUri(item.videoUrl,item.id) }}
-                style={styles.messageVideo}
-                controls
-                resizeMode="cover"
-                paused
-              />
+             <TouchableOpacity
+      activeOpacity={0.95}
+     onLongPress={() => handleLongPressMessage(item)}
+     onPress={() => {
+      setMediaViewer({ visible: true, uri: getDisplayUri(item.videoUrl, item.id), type: 'video' });
+  }}
+    >
+      <View style={styles.videoPlaceholder}>
+        <Icon name="videocam-outline" size={28} color="rgba(255,255,255,0.85)" />
+        <Text style={styles.videoPlaceholderText}>Tap to play video</Text>
+      </View>
+      <View pointerEvents="none" style={styles.playIconOverlay}>
+  <Icon name="play-circle-outline" size={40} color="rgba(255,255,255,0.85)" />
+</View>
+    </TouchableOpacity>
 
               {/* Download overlay — hidden once downloaded */}
-              {dlState !== 'done' && (
+              {!isUserMessage && dlState !== 'done' && (
                 <TouchableOpacity
                   style={styles.downloadOverlay}
                   onPress={() => downloadMedia(item)}
@@ -1768,6 +1789,51 @@ const senderInfo = (!isUserMessage && isGroup) ? getSenderInfo(item.senderId) : 
   );
 };
 
+// ─── Full-screen media viewer ────────────────────────────────────────────────
+const renderMediaViewer = () => (
+  <Modal
+    visible={mediaViewer.visible}
+    transparent
+    animationType="fade"
+    statusBarTranslucent
+    onRequestClose={() => setMediaViewer({ visible: false, uri: null, type: null })}
+  >
+    <View style={styles.mediaViewerOverlay}>
+      <TouchableOpacity
+        style={styles.mediaViewerClose}
+        onPress={() => setMediaViewer({ visible: false, uri: null, type: null })}
+        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+      >
+        <Icon name="close" size={28} color="#fff" />
+      </TouchableOpacity>
+
+      {mediaViewer.type === 'image' && mediaViewer.uri && (
+        <Image
+          source={{ uri: mediaViewer.uri }}
+          style={styles.mediaViewerImage}
+          resizeMode="contain"
+        />
+      )}
+
+      {mediaViewer.type === 'video' && mediaViewer.uri && (
+        <Video
+          key={mediaViewer.uri}
+          source={{ uri: mediaViewer.uri }}
+          style={styles.mediaViewerVideo}
+          controls
+          resizeMode="contain"
+          paused={false}
+          useTextureView={true}
+          onError={(e) => {
+            console.error('Video playback error:', e);
+            Alert.alert('Video error', 'Unable to play this video.');
+          }}
+        />
+      )}
+    </View>
+  </Modal>
+);
+
   // ─── Render helpers ─────────────────────────────────────────────────────────
   const renderAcceptRejectButtons = () => {
     if (!showAcceptReject) return null;
@@ -1809,10 +1875,10 @@ const senderInfo = (!isUserMessage && isGroup) ? getSenderInfo(item.senderId) : 
             <Text style={styles.mediaOptionText}>Photo</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.mediaOption} onPress={() => handleMediaSelection('video')}>
+          {/* <TouchableOpacity style={styles.mediaOption} onPress={() => handleMediaSelection('video')}>
             <Icon name="videocam-outline" size={24} color="#FF6D1F" />
             <Text style={styles.mediaOptionText}>Video</Text>
-          </TouchableOpacity>
+          </TouchableOpacity> */}
 
           <TouchableOpacity style={styles.cancelButton} onPress={() => setShowMediaPicker(false)}>
             <Text style={styles.cancelButtonText}>Cancel</Text>
@@ -1937,6 +2003,7 @@ const senderInfo = (!isUserMessage && isGroup) ? getSenderInfo(item.senderId) : 
         </View>
       </SafeAreaView>
       {renderMediaPicker()}
+      {renderMediaViewer()}
     </KeyboardAvoidingView>
   );
 }
@@ -2044,9 +2111,29 @@ const styles = StyleSheet.create({
   messageVideo: {
     width: SCREEN_WIDTH * 0.6,
     height: SCREEN_WIDTH * 0.6 * 0.75,
-    borderRadius: 2,
     marginBottom: 2,
     backgroundColor: '#000',
+  },
+  videoThumbContainer: {
+    width: SCREEN_WIDTH * 0.6,
+    height: SCREEN_WIDTH * 0.6 * 0.75,
+    borderRadius: 2,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+  },
+  videoPlaceholder: {
+    width: SCREEN_WIDTH * 0.6,
+    height: SCREEN_WIDTH * 0.6 * 0.75,
+    borderRadius: 2,
+    backgroundColor: '#111',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  videoPlaceholderText: {
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: 12,
+    fontWeight: '600',
   },
   messageTime: {
     color: 'rgba(255,255,255,0.7)',
@@ -2314,7 +2401,9 @@ paginationLoaderText: {
 },
 
  mediaWrapper: {
-    position: 'relative',       // lets the overlay sit on top of the image/video
+    position: 'relative',
+    overflow: 'hidden',   
+  borderRadius: 2,        
   },
   downloadOverlay: {
     position: 'absolute',
@@ -2355,5 +2444,39 @@ senderAvatar: {
   borderRadius: 14,
   marginBottom: 2,         // sits at bottom of avatar, aligning with bubble base
 },
-
+mediaViewerOverlay: {
+  flex: 1,
+  backgroundColor: '#000',
+  justifyContent: 'center',
+  alignItems: 'center',
+},
+mediaViewerClose: {
+  position: 'absolute',
+  top: Platform.OS === 'ios' ? 54 : 28,
+  right: 20,
+  zIndex: 10,
+  width: 40,
+  height: 40,
+  borderRadius: 20,
+  backgroundColor: 'rgba(0,0,0,0.5)',
+  justifyContent: 'center',
+  alignItems: 'center',
+},
+mediaViewerImage: {
+  width: Dimensions.get('window').width,
+  height: Dimensions.get('window').height,
+},
+mediaViewerVideo: {
+  width: Dimensions.get('window').width,
+  height: Dimensions.get('window').height * 0.75,
+},
+playIconOverlay: {
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  justifyContent: 'center',
+  alignItems: 'center',
+},
 });

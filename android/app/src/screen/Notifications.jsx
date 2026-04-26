@@ -33,6 +33,8 @@ const Notifications = () => {
   const [showRequests, setShowRequests] = useState(false);
   /** When set, bottom sheet shows only the request from this sender (from tapped notification). */
   const [modalFollowSenderUid, setModalFollowSenderUid] = useState(null);
+  /** follow_request notification doc id — used to clear unread dot after accept/reject (handleAccept does not delete this doc). */
+  const [activeFollowRequestNotificationId, setActiveFollowRequestNotificationId] = useState(null);
   const [loadingCollabDetails, setLoadingCollabDetails] = useState(false);
   const [projectDetailsVisible, setProjectDetailsVisible] = useState(false);
   const [selectedProjectForDetails, setSelectedProjectForDetails] = useState(null);
@@ -194,6 +196,25 @@ const Notifications = () => {
       await firestore().collection('profile').doc(myUid)
         .collection('followRequests').doc(request.id).delete();
 
+      if (activeFollowRequestNotificationId) {
+        await markAsRead(activeFollowRequestNotificationId);
+        setActiveFollowRequestNotificationId(null);
+      } else {
+        try {
+          const snap = await firestore()
+            .collection('notifications')
+            .where('recipientUid', '==', myUid)
+            .where('type', '==', 'follow_request')
+            .where('senderUid', '==', senderUid)
+            .get();
+          const batch = firestore().batch();
+          snap.docs.forEach((d) => batch.update(d.ref, { read: true }));
+          if (!snap.empty) await batch.commit();
+        } catch (_) {
+          /* non-fatal */
+        }
+      }
+
       await createNotification(senderUid, 'follow_accepted', {
         message: 'accepted your follow request',
         senderUsername: myUsername
@@ -201,6 +222,7 @@ const Notifications = () => {
 
       setShowRequests(false);
       setModalFollowSenderUid(null);
+      setActiveFollowRequestNotificationId(null);
       Alert.alert('Success', 'Follow request accepted');
     } catch (e) {
       
@@ -214,8 +236,29 @@ const Notifications = () => {
       await firestore().collection('profile').doc(currentUserUid)
         .collection('followRequests').doc(request.id).delete();
 
+      const senderUid = request.from;
+      if (activeFollowRequestNotificationId) {
+        await markAsRead(activeFollowRequestNotificationId);
+        setActiveFollowRequestNotificationId(null);
+      } else if (currentUserUid && senderUid) {
+        try {
+          const snap = await firestore()
+            .collection('notifications')
+            .where('recipientUid', '==', currentUserUid)
+            .where('type', '==', 'follow_request')
+            .where('senderUid', '==', senderUid)
+            .get();
+          const batch = firestore().batch();
+          snap.docs.forEach((d) => batch.update(d.ref, { read: true }));
+          if (!snap.empty) await batch.commit();
+        } catch (_) {
+          /* non-fatal */
+        }
+      }
+
       setShowRequests(false);
       setModalFollowSenderUid(null);
+      setActiveFollowRequestNotificationId(null);
       Alert.alert('Success', 'Follow request rejected');
     } catch (e) {
       
@@ -516,6 +559,7 @@ const handleNotificationPress = async (notification) => {
         notification.data?.from ||
         notification.data?.senderUid ||
         null;
+      setActiveFollowRequestNotificationId(notification.id);
       setModalFollowSenderUid(senderUid);
       setShowRequests(true);
       break;
@@ -891,6 +935,7 @@ const renderNotificationText = (notification) => {
         onRequestClose={() => {
           setShowRequests(false);
           setModalFollowSenderUid(null);
+          setActiveFollowRequestNotificationId(null);
         }}
       >
         <TouchableOpacity 
@@ -899,6 +944,7 @@ const renderNotificationText = (notification) => {
           onPress={() => {
             setShowRequests(false);
             setModalFollowSenderUid(null);
+            setActiveFollowRequestNotificationId(null);
           }}
         >
           <View style={styles.modalContent} onStartShouldSetResponder={() => true}>
@@ -931,6 +977,7 @@ const renderNotificationText = (notification) => {
                       <TouchableOpacity onPress={() => {
                         setShowRequests(false);
                         setModalFollowSenderUid(null);
+                        setActiveFollowRequestNotificationId(null);
                         navigation.navigate('Profile', { screen: 'Profile', params: { userId: req.from } });
                       }}>
                         <Text style={[styles.requestUsername, styles.usernameLink]}>{req.fromUsername || req.from}</Text>

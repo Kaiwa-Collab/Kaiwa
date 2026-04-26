@@ -16,6 +16,9 @@
   import {requestcamerapermission,requestgallerypermission} from '../../utils/permissions';
   import { getGitHubStatus } from '../../service/getGitHubStatus';
   import functions from '@react-native-firebase/functions';
+  import { useNotifications } from '../NotificationsContext'; // adjust path
+  import AsyncStorage from '@react-native-async-storage/async-storage';
+  import QnaStack from '../Qnastack';
 
 
 
@@ -43,7 +46,7 @@
     const navigation = useNavigation();
     const currentUser = auth().currentUser;
     const viewedUserId = route.params?.userId || currentUser?.uid;
-    const { posts, getCachedImageUri } = useUserData();
+    const { posts, getCachedImageUri, setPosts } = useUserData();
     const [transitioning, setTransitioning] = useState(false);
 
     // State variables
@@ -94,8 +97,23 @@
     const [canViewContent, setCanViewContent] = useState(false);
     const [userPosts, setUserPosts] = useState([]);
     const [loadingPosts, setLoadingPosts] = useState(false);
-
+    
     const isOwnProfile = viewedUserId === currentUser?.uid;
+
+    const { setHasUnseenQuestions, unseenQuestionIds, setUnseenQuestionIds } = useNotifications();
+
+// Keep seenAnswerMap as local state since it's only needed for markQuestionAnswersSeen:
+const [seenAnswerMap, setSeenAnswerMap] = useState({});
+
+
+const seenAnswersStorageKey = currentUser?.uid ? `question_answers_seen_${currentUser.uid}` : null;
+
+    /** Only the post author on their own profile — not followers / viewers. */
+    const canDeleteThisPost = (post) =>
+      !!currentUser?.uid &&
+      isOwnProfile &&
+      !!post?.userId &&
+      post.userId === currentUser.uid;
 
 
     useEffect(() => {
@@ -650,9 +668,11 @@
 
     useEffect(() => {
       if (activeTab === 'questions' && viewedUserId) {
-        fetchUserQuestions(viewedUserId);
-      }
-    }, [activeTab, viewedUserId]);
+         if (!isOwnProfile || userQuestions.length === 0) {
+      fetchUserQuestions(viewedUserId);
+    }
+  }
+}, [activeTab, viewedUserId]);
 
     useEffect(() => {
       if (!isOwnProfile && currentUser?.uid && viewedUserId) {
@@ -755,6 +775,51 @@
       );
     };
 
+    const confirmDeletePost = (post) => {
+      if (!canDeleteThisPost(post) || !post?.id) return;
+      Alert.alert(
+        'Delete post',
+        'This removes the post, its image, comments, and updates your profile count.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: async () => {
+              const user = auth().currentUser;
+              if (!user || post.userId !== user.uid) {
+                Alert.alert('Not allowed', 'You can only delete your own posts.');
+                return;
+              }
+              try {
+                await user.getIdToken(true);
+                await functions().httpsCallable('deletePost')({ postId: post.id });
+                setPosts((prev) => (prev || []).filter((p) => p.id !== post.id));
+                setUserProfile((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        postsCount: Math.max(0, (prev.postsCount || 1) - 1),
+                      }
+                    : prev
+                );
+              } catch (err) {
+                const code = err?.code || err?.details?.code;
+                let msg =
+                  err?.message ||
+                  err?.details?.message ||
+                  'Could not delete post';
+                if (code === 'functions/unauthenticated' || msg?.includes?.('unauthenticated')) {
+                  msg = 'Session expired or not signed in. Please sign in again and retry.';
+                }
+                Alert.alert('Error', msg);
+              }
+            },
+          },
+        ]
+      );
+    };
+
     const uploadPost = async () => {
       if (!selectedImage || !currentUser) return;
       setUploading(true);
@@ -835,21 +900,132 @@
 
     const formatNumber = (num) => (num >= 1000 ? (num / 1000).toFixed(1) + 'k' : num.toString());
 
-    const formatDate = (timestamp) => {
-      if (!timestamp) return '';
-      
-      let date;
-      if (timestamp && typeof timestamp.toDate === 'function') {
-        date = timestamp.toDate();
-      } else if (timestamp instanceof Date) {
-        date = timestamp;
-      } else {
-        date = new Date(timestamp);
+    const parseTimestampToDate = (timestamp) => {
+      if (!timestamp) return null;
+      if (timestamp instanceof Date) return Number.isNaN(timestamp.getTime()) ? null : timestamp;
+      if (typeof timestamp?.toDate === 'function') {
+        const d = timestamp.toDate();
+        return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
       }
-      
-      return date.toLocaleDateString() + ' ' + 
-            date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (typeof timestamp === 'number') {
+        const d = new Date(timestamp);
+        return Number.isNaN(d.getTime()) ? null : d;
+      }
+      if (typeof timestamp === 'string') {
+        const d = new Date(timestamp);
+        return Number.isNaN(d.getTime()) ? null : d;
+      }
+      if (typeof timestamp === 'object' && timestamp._seconds != null) {
+        const ms = Number(timestamp._seconds) * 1000 + Math.floor((Number(timestamp._nanoseconds) || 0) / 1e6);
+        const d = new Date(ms);
+        return Number.isNaN(d.getTime()) ? null : d;
+      }
+      return null;
     };
+
+    const formatDate = (timestamp) => {
+      const date = parseTimestampToDate(timestamp);
+      if (!date) return 'Unknown date';
+      return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    };
+
+const toMs = (value) => {
+  if (!value) return 0;
+  if (typeof value?.toDate === 'function') {
+    const d = value.toDate();
+    return d instanceof Date && !Number.isNaN(d.getTime()) ? d.getTime() : 0;
+  }
+  if (typeof value === 'object' && value._seconds != null) {
+    return Number(value._seconds) * 1000 + Math.floor((Number(value._nanoseconds) || 0) / 1e6);
+  }
+  const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
+const getLatestAnswerMs = (question) => {
+  const answers = Array.isArray(question?.answers) ? question.answers : [];
+  return answers.reduce((maxMs, answer) => {
+    const ansMs = Math.max(toMs(answer?.timestamp), toMs(answer?.createdAt), toMs(answer?.updatedAt));
+    return ansMs > maxMs ? ansMs : maxMs;
+  }, 0);
+};
+
+const persistSeenAnswerMap = async (nextMap) => {
+  if (!seenAnswersStorageKey) return;
+  try {
+    await AsyncStorage.setItem(seenAnswersStorageKey, JSON.stringify(nextMap));
+  } catch (_) {}
+};
+
+const markQuestionAnswersSeen = async (question) => {
+  if (!question?.id || !isOwnProfile) return;
+  const latestMs = getLatestAnswerMs(question);
+  const seenAt = latestMs || Date.now();
+  setSeenAnswerMap(prev => {
+    const next = { ...prev, [question.id]: seenAt };
+    persistSeenAnswerMap(next);
+    return next;
+  });
+  setUnseenQuestionIds(prev => prev.filter(id => id !== question.id));
+};
+
+// Sync unseen state from AsyncStorage whenever questions load
+// useEffect(() => {
+//   let cancelled = false;
+//   const syncSeenState = async () => {
+//     if (!isOwnProfile || !seenAnswersStorageKey) {
+//       setUnseenQuestionIds([]);
+//       return;
+//     }
+//     try {
+//       const raw = await AsyncStorage.getItem(seenAnswersStorageKey);
+//       const storedMap = raw ? JSON.parse(raw) : null;
+//       const nextMap = storedMap && typeof storedMap === 'object' ? { ...storedMap } : {};
+
+//       // First time: baseline all existing answers as seen so old answers don't show dots
+//       if (!storedMap) {
+//         (userQuestions || []).forEach((question) => {
+//           const latestMs = getLatestAnswerMs(question);
+//           if (latestMs > 0) nextMap[question.id] = latestMs;
+//         });
+//         await persistSeenAnswerMap(nextMap);
+//       }
+
+//       if (cancelled) return;
+//       setSeenAnswerMap(nextMap);
+
+//       const unseenIds = (userQuestions || [])
+//         .filter((question) => {
+//           const latestAnswerMs = getLatestAnswerMs(question);
+//           if (latestAnswerMs <= 0) return false;
+//           return latestAnswerMs > Number(nextMap[question.id] || 0);
+//         })
+//         .map((question) => question.id);
+
+//       setUnseenQuestionIds(unseenIds);
+//     } catch (_) {
+//       if (!cancelled) setUnseenQuestionIds([]);
+//     }
+//   };
+//   syncSeenState();
+//   return () => { cancelled = true; };
+// }, [isOwnProfile, seenAnswersStorageKey, userQuestions]);
+
+// ✅ This is the key effect — drives both Questions tab dot AND Profile icon dot
+useEffect(() => {
+  if (isOwnProfile) {
+    setHasUnseenQuestions(unseenQuestionIds.length > 0);
+  }
+}, [unseenQuestionIds, isOwnProfile]);
+
+useEffect(() => {
+  loadUserData();
+  fetchUserPosts(viewedUserId);
+  // ✅ Pre-fetch questions so unseen dot can be computed without tapping the tab
+  if (isOwnProfile && viewedUserId) {
+    fetchUserQuestions(viewedUserId);
+  }
+}, [viewedUserId, isOwnProfile]);
 
     const deleteQuestion = async (questionId, questionTitle) => {
       Alert.alert(
@@ -907,6 +1083,17 @@
       );
     };
 
+    const openStatistics = async () => {
+      try {
+        // Ensure we have data to show in the statistics modal
+        if (collaborationProjects.length === 0 && viewedUserId) {
+          await fetchCollaborationProjects();
+        }
+      } finally {
+        setProjectStatsModalVisible(true);
+      }
+    };
+
 
     const renderTabContent = () => {
       if (!canViewContent) {
@@ -938,11 +1125,6 @@
             <View style={styles.tabContent}>
               <Icon name="camera-outline" size={64} color="#666" />
               <Text style={styles.emptyText}>Posts will appear here</Text>
-              {isOwnProfile && (
-                <TouchableOpacity style={styles.uploadButton} onPress={selectImage}>
-                  <Text style={styles.uploadButtonText}>Upload Photo</Text>
-                </TouchableOpacity>
-              )}
             </View>
           );
         }
@@ -951,14 +1133,17 @@
           <ScrollView contentContainerStyle={styles.gridContainer}>
             <View style={styles.grid}>
               {visiblePosts.map((post, idx) => (
-                <TouchableOpacity
+                <View
                   key={post.id}
                   style={[
                     styles.gridItem,
                     { marginRight: (idx + 1) % 3 === 0 ? 0 : 8 }
                   ]}
-                  activeOpacity={0.8}
-                  onPress={() => navigation.navigate('PostDetail', {
+                >
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    style={styles.gridItemTouchable}
+                    onPress={() => navigation.navigate('PostDetail', {
   postData: {
     postsId: post.id,
     name: post.username || displayName,
@@ -974,12 +1159,22 @@
   allPosts: visiblePosts,
   initialIndex: idx,
 })}
-                >
-                  <Image
-                    source={{ uri: getCachedImageUri(post.imageUrl) }}
-                    style={styles.gridImage}
-                  />
-                </TouchableOpacity>
+                  >
+                    <Image
+                      source={{ uri: getCachedImageUri(post.imageUrl) }}
+                      style={styles.gridImage}
+                    />
+                  </TouchableOpacity>
+                  {canDeleteThisPost(post) && (
+                    <TouchableOpacity
+                      style={styles.deletePostButton}
+                      onPress={() => confirmDeletePost(post)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <Icon name="trash-outline" size={16} color="#fff" />
+                    </TouchableOpacity>
+                  )}
+                </View>
               ))}
             </View>
           </ScrollView>
@@ -1013,34 +1208,61 @@
               </View>
             ) : (
               <ScrollView style={styles.questionsContainer} showsVerticalScrollIndicator={false}>
-                {userQuestions.map((question) => (
-                  <TouchableOpacity 
-                    key={question.id} 
-                    style={styles.questionCard}
-                    onPress={() => {
-                      navigation.navigate('Qna', { selectedQuestionId: question.id });
-                    }}
-                  >
-                    <View style={styles.questionHeader}>
-                      <View style={styles.questionTitleContainer}>
-                        <Text style={styles.questionTitle} numberOfLines={2}>
-                          {question.title}
-                        </Text>
-                      </View>
-                      
-                      {isOwnProfile && (
-                        <TouchableOpacity
-                          style={styles.deleteButton}
-                          onPress={(e) => {
-                            e.stopPropagation();
-                            deleteQuestion(question.id, question.title);
-                          }}
-                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                        >
-                          <Icon name="trash-outline" size={18} color="#ff4444" />
-                        </TouchableOpacity>
-                      )}
-                    </View>
+                {userQuestions.map((question) => {
+  const hasNewAnswer = isOwnProfile && unseenQuestionIds.includes(question.id);
+  
+  return (
+    <TouchableOpacity
+      key={question.id}
+      style={styles.questionCard}
+     onPress={async () => {
+  await markQuestionAnswersSeen(question);
+  navigation.navigate('Qna', {
+  screen: 'Qna',
+  params: {
+    selectedQuestionData: {
+      id: question.id,
+      title: question.title,
+      content: question.content,
+      username: question.username || displayName,
+      userImage: question.userImage || avatarUrl,
+      timestamp: question.timestamp,
+      answers: question.answers || [],
+      tags: question.tags || [],
+      authorId: question.authorId,
+      likes: question.likes || 0,
+      likedBy: question.likedBy || [],
+      imageUrl: question.imageUrl || null,
+    }
+  }
+});
+}}
+    >
+      <View style={styles.questionHeader}>
+        <View style={styles.questionTitleContainer}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Text style={styles.questionTitle} numberOfLines={2}>
+              {question.title}
+            </Text>
+            {hasNewAnswer && (
+              <View style={styles.newAnswerDot} />
+            )}
+          </View>
+        </View>
+
+        {isOwnProfile && (
+          <TouchableOpacity
+            style={styles.deleteButton}
+            onPress={(e) => {
+              e.stopPropagation();
+              deleteQuestion(question.id, question.title);
+            }}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Icon name="trash-outline" size={18} color="#ff4444" />
+          </TouchableOpacity>
+        )}
+      </View>
                     
                     <Text style={styles.questionDescription} numberOfLines={3}>
                       {question.content}
@@ -1067,8 +1289,9 @@
                         ))}
                       </View>
                     )}
-                  </TouchableOpacity>
-                ))}
+                   </TouchableOpacity>
+                );
+              })}
               </ScrollView>
             )}
           </View>
@@ -1076,26 +1299,10 @@
       }
       
       if (activeTab === 'Collaborations') {
-        // Calculate project stats
-        const createdProjects = collaborationProjects.filter(p => p.creatorId === viewedUserId).length;
-        const participatedProjects = collaborationProjects.filter(p => 
-          p.collaborators?.includes(viewedUserId) && p.creatorId !== viewedUserId
-        ).length;
-        const ongoingProjects = collaborationProjects.filter(p => 
-          p.status !== 'completed' && p.status !== 'pending'
-        ).length;
-        const completedProjects = collaborationProjects.filter(p => p.status === 'completed').length;
-        
         return (
           <View style={styles.collaborationTabContent}>
             <View style={styles.collaborationHeader}>
-              <TouchableOpacity 
-                style={styles.projectStatsButton}
-                onPress={() => setProjectStatsModalVisible(true)}
-              >
-                <Icon name="stats-chart-outline" size={20} color="white" />
-                <Text style={styles.projectStatsButtonText}>Project Stats</Text>
-              </TouchableOpacity>
+              <View />
               {isOwnProfile && (
                 <TouchableOpacity 
                   style={styles.createProjectButtonTop}
@@ -1194,47 +1401,6 @@
                 })}
               </ScrollView>
             )}
-            
-            {/* Project Stats Modal */}
-            <Modal
-              visible={projectStatsModalVisible}
-              animationType="slide"
-              transparent={true}
-              onRequestClose={() => setProjectStatsModalVisible(false)}
-            >
-              <View style={styles.modalOverlay}>
-                <View style={styles.projectStatsModalContainer}>
-                  <View style={styles.modalHeader}>
-                    <Text style={styles.modalTitle}>Project Statistics</Text>
-                    <TouchableOpacity onPress={() => setProjectStatsModalVisible(false)}>
-                      <Icon name="close" size={24} color="white" />
-                    </TouchableOpacity>
-                  </View>
-                  
-                  <View style={styles.statsFormContainer}>
-                    <View style={styles.statsFormRow}>
-                      <Text style={styles.statsFormLabel}>Projects Created:</Text>
-                      <Text style={styles.statsFormValue}>{createdProjects}</Text>
-                    </View>
-                    
-                    <View style={styles.statsFormRow}>
-                      <Text style={styles.statsFormLabel}>Projects Participated:</Text>
-                      <Text style={styles.statsFormValue}>{participatedProjects}</Text>
-                    </View>
-                    
-                    <View style={styles.statsFormRow}>
-                      <Text style={styles.statsFormLabel}>Ongoing:</Text>
-                      <Text style={styles.statsFormValue}>{ongoingProjects}</Text>
-                    </View>
-                    
-                    <View style={styles.statsFormRow}>
-                      <Text style={styles.statsFormLabel}>Completed:</Text>
-                      <Text style={styles.statsFormValue}>{completedProjects}</Text>
-                    </View>
-                  </View>
-                </View>
-              </View>
-            </Modal>
             
             {/* Project Details Modal for Non-Creators */}
             <Modal
@@ -1646,9 +1812,6 @@
           <View style={styles.sidebutton}>
             {isOwnProfile ? (
               <>
-                <TouchableOpacity onPress={selectImage} style={styles.headerButton}>
-                  <Icon name="add" size={24} color="white" />
-                </TouchableOpacity>
                 <TouchableOpacity
                   onPress={() => navigation.navigate('Settings')} style={styles.headerButton}>
                   <Icon name="settings-outline" size={24} color="white" />
@@ -1683,7 +1846,16 @@
           </View>
 
           <View style={styles.infoSection}>
-            <Text style={styles.displayName}>{displayName}</Text>
+            <View style={styles.profileNameRow}>
+              <Text style={styles.displayName}>{displayName}</Text>
+              <TouchableOpacity
+                style={styles.statisticsButton}
+                onPress={openStatistics}
+              >
+                <Icon name="stats-chart-outline" size={18} color="white" />
+                <Text style={styles.statisticsButtonText}>Statistics</Text>
+              </TouchableOpacity>
+            </View>
             <Text style={styles.bio}>{userProfile?.bio || 'No bio available.'}</Text>
             <Text style={styles.meta}> {userProfile?.website || null}</Text>
           </View>
@@ -1717,9 +1889,12 @@
               style={[styles.tab, activeTab === 'questions' && styles.activeTab]}
               onPress={() => setActiveTab('questions')}
             >
-              <Icon name="help-circle-outline" size={20} color={activeTab === 'questions' ? '#007AFF' : '#666'} />
-              <Text style={[styles.tabText, activeTab === 'questions' && styles.activeTabText]}>Questions</Text>
-            </TouchableOpacity>
+                <View style={{ position: 'relative' }}>
+    <Icon name="help-circle-outline" size={20} color={activeTab === 'questions' ? '#007AFF' : '#666'} />
+    {unseenQuestionIds.length > 0 && <View style={styles.tabDot} />}
+  </View>
+  <Text style={[styles.tabText, activeTab === 'questions' && styles.activeTabText]}>Questions</Text>
+</TouchableOpacity>
             <TouchableOpacity
               style={[styles.tab, activeTab === 'Collaborations' && styles.activeTab]}
               onPress={() => setActiveTab('Collaborations')}
@@ -1732,6 +1907,59 @@
 
           {renderTabContent()}
         </ScrollView>
+
+        {/* Project Stats Modal */}
+        <Modal
+          visible={projectStatsModalVisible}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setProjectStatsModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.projectStatsModalContainer}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Project Statistics</Text>
+                <TouchableOpacity onPress={() => setProjectStatsModalVisible(false)}>
+                  <Icon name="close" size={24} color="white" />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.statsFormContainer}>
+                <View style={styles.statsFormRow}>
+                  <Text style={styles.statsFormLabel}>Projects Created:</Text>
+                  <Text style={styles.statsFormValue}>
+                    {collaborationProjects.filter(p => p.creatorId === viewedUserId).length}
+                  </Text>
+                </View>
+
+                <View style={styles.statsFormRow}>
+                  <Text style={styles.statsFormLabel}>Projects Participated:</Text>
+                  <Text style={styles.statsFormValue}>
+                    {collaborationProjects.filter(p =>
+                      p.collaborators?.includes(viewedUserId) && p.creatorId !== viewedUserId
+                    ).length}
+                  </Text>
+                </View>
+
+                <View style={styles.statsFormRow}>
+                  <Text style={styles.statsFormLabel}>Ongoing:</Text>
+                  <Text style={styles.statsFormValue}>
+                    {collaborationProjects.filter(p =>
+                      p.status !== 'completed' && p.status !== 'pending'
+                    ).length}
+                  </Text>
+                </View>
+
+                <View style={styles.statsFormRow}>
+                  <Text style={styles.statsFormLabel}>Completed:</Text>
+                  <Text style={styles.statsFormValue}>
+                    {collaborationProjects.filter(p => p.status === 'completed').length}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </View>
+        </Modal>
 
         {/* Upload Post Modal */}
         {isOwnProfile && (
@@ -2014,10 +2242,32 @@
     infoSection: {
       marginBottom: 20 
     },
+    profileNameRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 12,
+    },
     displayName: { 
       fontSize: 18, 
       fontWeight: '600', 
       color: 'white' 
+    },
+    statisticsButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: '#333',
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: '#555',
+    },
+    statisticsButtonText: {
+      color: 'white',
+      fontWeight: '600',
+      fontSize: 14,
+      marginLeft: 8,
     },
     bio: {
       fontSize: 14, 
@@ -2211,12 +2461,27 @@
       width: '100%',
     },
     gridItem: {
+      position: 'relative',
       marginBottom: 8,
       borderRadius: 8,
       overflow: 'hidden',
       backgroundColor: '#222',
       width: (width - 16 * 2 - 8 * (3 - 1)) / 3,
       height: (width - 16 * 2 - 8 * (3 - 1)) / 3,
+    },
+    gridItemTouchable: {
+      flex: 1,
+      width: '100%',
+      height: '100%',
+    },
+    deletePostButton: {
+      position: 'absolute',
+      top: 4,
+      right: 4,
+      backgroundColor: 'rgba(0,0,0,0.55)',
+      borderRadius: 14,
+      padding: 6,
+      zIndex: 2,
     },
     gridImage: {
       width: '100%',
@@ -2830,6 +3095,22 @@
   backgroundColor: '#555',
   borderWidth: 1,
   borderColor: '#888',
+},
+tabDot: {
+  position: 'absolute',
+  top: -2,
+  right: -4,
+  width: 8,
+  height: 8,
+  borderRadius: 4,
+  backgroundColor: '#FF6D1F',
+},
+newAnswerDot: {
+  width: 8,
+  height: 8,
+  borderRadius: 4,
+  backgroundColor: '#FF6D1F',
+  marginLeft: 8,
 },
   });
 

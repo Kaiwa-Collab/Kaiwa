@@ -115,7 +115,7 @@ useEffect(() => {
           const commentList = [];
           snapshot.forEach(doc => {
             const data = doc.data();
-           
+            
             commentList.push({ 
               id: doc.id, 
               ...data,
@@ -154,10 +154,9 @@ useEffect(() => {
     return () => clearTimeout(id);
   }, [comments.length]);
 
-  useEffect(() => {
-  navigation.setParams({syncedCommentCount: comments.length});
-
-  if(typeof route.params?.onCommentCountSync === 'function') {
+  // Replace the comments.length sync effect with just this:
+useEffect(() => {
+  if (typeof route.params?.onCommentCountSync === 'function') {
     route.params.onCommentCountSync(comments.length);
   }
 }, [comments.length]);
@@ -277,27 +276,39 @@ useEffect(() => {
         replies: [],
       };
 
-      
+      const postRef = firestore().collection('posts').doc(postId);
+      const batch = firestore().batch();
 
-      // Use set() instead of add() so we can use serverTimestamp
-      await commentRef.set({
+      // Use set() so we can use serverTimestamp.
+      batch.set(commentRef, {
         ...newComment,
         createdAt: firestore.FieldValue.serverTimestamp(),
       });
 
-      // Try to update post's comment count
-      // try {
-      //   await firestore()
-      //     .collection('posts')
-      //     .doc(postId)
-      //     .update({
-      //       commentCount: firestore.FieldValue.increment(1),
-      //       lastCommentAt: firestore.FieldValue.serverTimestamp(),
-      //     });
-      
-      // } catch (updateError) {
-        
-      // }
+      // Persist commentCount on the post doc so the feed shows correct value after app restart.
+      // Using set(..., { merge: true }) avoids failing if commentCount doesn't exist yet.
+      batch.set(
+        postRef,
+        {
+          lastCommentAt: firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      await batch.commit();
+
+      // Reconcile to the exact number of comment docs to avoid drift
+      // (e.g. if older data had inconsistent commentCount).
+      try {
+        const snap = await firestore()
+          .collection('posts')
+          .doc(postId)
+          .collection('comments')
+          .get();
+        await postRef.set({ commentCount: snap.size }, { merge: true });
+      } catch (e) {
+        // Non-fatal; UI still updates via snapshot + local sync.
+      }
     }
     
     setCommentInput('');
@@ -450,17 +461,19 @@ useEffect(() => {
               
               await commentDocRef.delete();
               
-              // Update post comment count (optional)
-              // try {
-              //   await firestore()
-              //     .collection('posts')
-              //     .doc(postId)
-              //     .update({
-              //       commentCount: firestore.FieldValue.increment(-1),
-              //     });
-              // } catch (updateError) {
-                
-              // }
+              // Keep post commentCount consistent (so feed stays correct across restarts).
+              try {
+                const postRef = firestore().collection('posts').doc(postId);
+                // Reconcile to the exact size to prevent count drift.
+                const snap = await firestore()
+                  .collection('posts')
+                  .doc(postId)
+                  .collection('comments')
+                  .get();
+                await postRef.set({ commentCount: snap.size }, { merge: true });
+              } catch (updateError) {
+                // If this fails, the UI still updates via snapshot; count may be stale until next refresh.
+              }
 
             } catch (error) {
               if (error.code === 'not-found') {

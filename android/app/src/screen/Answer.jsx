@@ -314,7 +314,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     backgroundColor: '#1e1e1e',
     borderBottomWidth: 1,
-    borderBottomColor: '#1e1e1e',
+    borderBottomColor: 'white',
   },
   modalTitle: {
     fontSize: 18,

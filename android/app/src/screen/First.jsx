@@ -936,7 +936,7 @@ export default function First() {
   );
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#1e1e1e' }}>
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: '#1e1e1e' }}>
       <View style={styles.outerContainer}>
         <StatusBar barStyle="light-content" backgroundColor="#000" translucent={false} />
 

@@ -146,6 +146,52 @@ async function markMessageFailed(tempId) {
     [tempId]
   );
 }
+
+/**
+ * Mark an existing message as deleted locally so reopen/hydrate is consistent.
+ */
+async function markMessageDeleted(messageId, deletedText = 'This message was deleted') {
+  const db = await getDB();
+  await db.executeSql(
+    `UPDATE messages
+     SET text = ?,
+         media_url = NULL,
+         media_type = 'deleted',
+         status = CASE
+           WHEN status = 'seen' THEN 'seen'
+           WHEN status = 'delivered' THEN 'delivered'
+           WHEN status = 'failed' THEN 'failed'
+           ELSE 'sent'
+         END
+     WHERE id = ? OR server_id = ? OR temp_id = ?`,
+    [deletedText, messageId, messageId, messageId]
+  );
+}
+
+/**
+ * Restore a message in local DB if optimistic deletion fails.
+ */
+async function restoreMessageContent(message) {
+  if (!message?.id) return;
+  const db = await getDB();
+  await db.executeSql(
+    `UPDATE messages
+     SET text = ?,
+         media_url = ?,
+         media_type = ?,
+         status = ?
+     WHERE id = ? OR server_id = ? OR temp_id = ?`,
+    [
+      message.text || null,
+      message.imageUrl || message.videoUrl || message.mediaUrl || null,
+      message.messageType || message.mediaType || null,
+      message.status || 'sent',
+      message.id,
+      message.id,
+      message.id,
+    ]
+  );
+}
  
 /**
  * Update delivery / read status for one or many server message ids.
@@ -387,6 +433,8 @@ const chatSQLiteService = {
   saveOptimisticMessage,
   confirmMessage,
   markMessageFailed,
+  markMessageDeleted,
+  restoreMessageContent,
   updateDeliveryStatus,
   upsertIncomingMessage,
   upsertOwnServerMessage,

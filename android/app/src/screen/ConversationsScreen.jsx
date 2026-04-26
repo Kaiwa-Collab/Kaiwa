@@ -1,5 +1,20 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { ScrollView, StyleSheet, Text, View, Alert, TouchableOpacity, RefreshControl } from 'react-native';
+import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Dimensions,
+  FlatList,
+  Image,
+  Modal,
+  Platform,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import Post from '../Post';
 import { useUserData } from '../users';
 import { requestcamerapermission, requestgallerypermission } from '../../utils/permissions';
@@ -8,8 +23,12 @@ import Postskeleton from '../animations/postskeleton';
 import firestore from '@react-native-firebase/firestore';
 import Icon from 'react-native-vector-icons/Ionicons';
 import functions from '@react-native-firebase/functions';
+import { useFocusEffect } from '@react-navigation/native';
+import storage from '@react-native-firebase/storage';
+import { launchImageLibrary } from 'react-native-image-picker';
 
 const PERMISSIONS_REQUESTED_KEY = '@permissions_requested';
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 const requestinitialpermissions = async () => {
   try {
@@ -131,19 +150,231 @@ const mergePostsByRecency = (existing = [], incoming = []) => {
   return [...map.values()].sort((a, b) => getPostTimestamp(b) - getPostTimestamp(a));
 };
 
-const ConversationsScreen = () => {
+const chunk = (arr = [], size = 10) => {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+};
+
+const ConversationsScreen = ({ navigation }) => {
   const { loading, followingPosts, getCachedImageUri, currentUser, followingIds, refreshPostsFromFollowing } = useUserData();
   const [popularPosts, setPopularPosts] = useState([]);
   const [mergedFollowingPosts, setMergedFollowingPosts] = useState([]);
   const [loadingPopular, setLoadingPopular] = useState(false);
   const [combinedPosts, setCombinedPosts] = useState([]);
+  const [popularSectionStartIndex, setPopularSectionStartIndex] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [initialLoad, setInitialLoad] = useState(true);
 
+  const [uploadModalVisible, setUploadModalVisible] = useState(false);
+  const [caption, setCaption] = useState('');
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [previewExpanded, setPreviewExpanded] = useState(false); // fit (contain) vs fill (cover) within original frame
+
+  const resolveAspectRatio = useCallback(() => {
+    // Original frame only (Instagram-like); no alternate crops.
+    const w = selectedImage?.width;
+    const h = selectedImage?.height;
+    if (typeof w === 'number' && typeof h === 'number' && w > 0 && h > 0) return w / h;
+    return 1; // square fallback when picker doesn't provide dimensions
+  }, [selectedImage?.height, selectedImage?.width]);
+
+  const refreshCommentCountsFor = useCallback(async (posts = []) => {
+    const ids = [...new Set(posts.map(p => p?.id || p?.postId).filter(Boolean))];
+    if (ids.length === 0) return;
+
+    try {
+      const countsMap = {};
+
+      // Firestore "in" queries are limited (commonly 10 values).
+      const batches = chunk(ids, 10);
+      const snaps = await Promise.all(
+        batches.map(group =>
+          firestore()
+            .collection('posts')
+            .where(firestore.FieldPath.documentId(), 'in', group)
+            .get()
+        )
+      );
+
+      snaps.forEach(snap => {
+        snap.forEach(doc => {
+          const data = doc.data() || {};
+          if (typeof data.commentCount === 'number') countsMap[doc.id] = data.commentCount;
+        });
+      });
+
+      if (Object.keys(countsMap).length === 0) return;
+
+      setCombinedPosts(prev =>
+        prev.map(p => {
+          const key = p?.id || p?.postId;
+          const nextCount = countsMap[key];
+          return nextCount === undefined ? p : { ...p, commentCount: nextCount };
+        })
+      );
+    } catch (e) {
+      // Non-fatal; we fall back to aggregated/cached counts.
+      console.log('[ConversationsScreen] refreshCommentCountsFor failed:', e.message);
+    }
+  }, []);
+
   useEffect(() => {
     if (currentUser) requestinitialpermissions();
   }, [currentUser?.uid]);
+
+  const ensureProfileExists = useCallback(async (userId) => {
+    await functions().httpsCallable('ensureProfileExists')({ userId });
+  }, []);
+
+  const selectImage = useCallback(async () => {
+    const haspermission = await requestgallerypermission();
+    if (!haspermission) return;
+
+    launchImageLibrary(
+      { mediaType: 'photo', quality: 0.8, includeBase64: false },
+      (response) => {
+        if (response?.assets && response.assets.length > 0) {
+          setSelectedImage(response.assets[0]);
+          setPreviewExpanded(false);
+          setUploadModalVisible(true);
+        }
+      }
+    );
+  }, []);
+
+  const uploadPost = useCallback(async () => {
+    if (!selectedImage || !currentUser?.uid) return;
+    setUploading(true);
+    try {
+      await ensureProfileExists(currentUser.uid);
+
+      const imageName = `posts/${currentUser.uid}/${Date.now()}_${selectedImage.fileName || 'image.jpg'}`;
+      const reference = storage().ref(imageName);
+      await reference.putFile(selectedImage.uri);
+      const imageUrl = await reference.getDownloadURL();
+
+      const profileSnap = await firestore().collection('profile').doc(currentUser.uid).get();
+      const profile = profileSnap.exists ? (profileSnap.data() || {}) : {};
+      const username = profile.name || profile.displayName || profile.username || 'User';
+      const userAvatar = profile.avatar || null;
+
+      await functions().httpsCallable('createPost')({
+        imageUrl,
+        caption,
+        username,
+        userAvatar,
+        imageAspectRatio: resolveAspectRatio(),
+        imageFitMode: previewExpanded ? 'cover' : 'contain',
+      });
+
+      setSelectedImage(null);
+      setCaption('');
+      setPreviewExpanded(false);
+      setUploadModalVisible(false);
+      Alert.alert('Success', 'Post uploaded successfully!');
+    } catch (e) {
+      Alert.alert('Error', 'Failed to upload post.');
+    } finally {
+      setUploading(false);
+    }
+  }, [caption, currentUser?.uid, ensureProfileExists, resolveAspectRatio, selectedImage]);
+
+  useLayoutEffect(() => {
+    if (!navigation?.setOptions) return;
+    navigation.setOptions({
+      headerRight: () => (
+        <TouchableOpacity
+          onPress={selectImage}
+          style={{ paddingHorizontal: 16, paddingVertical: 8 }}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
+          <Icon name="add" size={26} color="white" />
+        </TouchableOpacity>
+      ),
+    });
+  }, [navigation, selectImage]);
+
+  const uploadModal = (
+    <Modal
+      visible={uploadModalVisible}
+      animationType="slide"
+      transparent
+      onRequestClose={() => {
+        if (uploading) return;
+        setUploadModalVisible(false);
+      }}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity
+              onPress={() => {
+                if (uploading) return;
+                setUploadModalVisible(false);
+              }}
+            >
+              <Icon name="close" size={24} color="white" />
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>New Post</Text>
+            <TouchableOpacity onPress={uploadPost} disabled={uploading}>
+              <Text style={[styles.shareButton, uploading && styles.disabledButton]}>
+                {uploading ? 'Posting...' : 'Share'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {selectedImage ? (
+            <>
+              <View style={[styles.frameWrap, { height: Math.min(SCREEN_WIDTH, 520) }]}>
+                <Image
+                  source={{ uri: selectedImage.uri }}
+                  style={styles.framedImage}
+                  resizeMode={previewExpanded ? 'cover' : 'contain'}
+                />
+                <TouchableOpacity
+                  style={styles.expandToggle}
+                  onPress={() => setPreviewExpanded((v) => !v)}
+                  disabled={uploading}
+                  activeOpacity={0.85}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <Icon
+                    name={previewExpanded ? 'contract-outline' : 'expand-outline'}
+                    size={18}
+                    color="white"
+                  />
+                </TouchableOpacity>
+              </View>
+            </>
+          ) : (
+            <View style={styles.previewPlaceholder}>
+              <Text style={styles.previewPlaceholderText}>Pick an image to post</Text>
+            </View>
+          )}
+
+          <TextInput
+            style={styles.captionInput}
+            placeholder="Write a caption..."
+            placeholderTextColor="#666"
+            value={caption}
+            onChangeText={setCaption}
+            multiline
+            maxLength={500}
+          />
+
+          {uploading && (
+            <View style={styles.uploadingContainer}>
+              <ActivityIndicator size="large" color="#007AFF" />
+              <Text style={styles.uploadingText}>Uploading your post...</Text>
+            </View>
+          )}
+        </View>
+      </View>
+    </Modal>
+  );
 
   const initializeAggregatedData = useCallback(async () => {
     try {
@@ -301,6 +532,7 @@ const ConversationsScreen = () => {
 
     if (following.length === 0 && nonFollowingPopular.length === 0) {
       setCombinedPosts([]);
+      setPopularSectionStartIndex(0);
       return;
     }
 
@@ -315,9 +547,14 @@ const ConversationsScreen = () => {
       if (hydratedFollowing.length > 0) {
         const seenIds = new Set(hydratedFollowing.map(p => p.id || p.postId));
         const uniquePopular = nonFollowingPopular.filter(p => !seenIds.has(p.id || p.postId));
-        setCombinedPosts([...hydratedFollowing, ...uniquePopular]);
+        const next = [...hydratedFollowing, ...uniquePopular];
+        setCombinedPosts(next);
+        setPopularSectionStartIndex(hydratedFollowing.length);
+        refreshCommentCountsFor(next);
       } else {
         setCombinedPosts(nonFollowingPopular);
+        setPopularSectionStartIndex(0);
+        refreshCommentCountsFor(nonFollowingPopular);
       }
 
       if (initialLoad && (following.length > 0 || nonFollowingPopular.length > 0)) {
@@ -326,7 +563,15 @@ const ConversationsScreen = () => {
     };
 
     buildCombined();
-  }, [mergedFollowingPosts, popularPosts, initialLoad, followingIds]);
+  }, [mergedFollowingPosts, popularPosts, initialLoad, followingIds, refreshCommentCountsFor]);
+
+  // When the user returns to this screen (including cold start -> first focus),
+  // refresh comment counts from the canonical posts collection.
+  useFocusEffect(
+    useCallback(() => {
+      refreshCommentCountsFor(combinedPosts);
+    }, [combinedPosts, refreshCommentCountsFor])
+  );
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -344,66 +589,87 @@ const ConversationsScreen = () => {
     }
   };
 
+  const renderFeedItem = useCallback(({ item, index }) => {
+    const isFirstPopular = index === popularSectionStartIndex && popularSectionStartIndex > 0;
+    return (
+      <React.Fragment key={item.id || item.postId || index}>
+        {isFirstPopular && (
+          <View style={styles.sectionDivider}>
+            <View style={styles.dividerLine} />
+            <Text style={styles.sectionText}>🔥 Trending on Kaiwa</Text>
+            <View style={styles.dividerLine} />
+          </View>
+        )}
+        <Post
+          postsId={item.id || item.postId}
+          name={item.username || 'Anonymous'}
+          // Be tolerant of different payload shapes so post images always render.
+          image={item.imageUrl || item.image || item.mediaUrl || item.photoUrl || item.avatarUrl || null}
+          Avatar={item.userAvatar || null}
+          caption={item.caption || item.content || ''}
+          initialLikeCount={item.likeCount || item.likes || 0}
+          initialLikedBy={item.likedBy || []}
+          createdAt={item.createdAt}
+          userId={item.userId}
+          commentCount={item.commentCount || 0}
+          imageAspectRatio={item.imageAspectRatio}
+          imageFitMode={item.imageFitMode}
+        />
+      </React.Fragment>
+    );
+  }, [popularSectionStartIndex]);
+
   if (initialLoad || loading || loadingPopular) {
     return (
-      <ScrollView contentContainerStyle={styles.feed}>
-        {[...Array(3)].map((_, index) => (
-          <Postskeleton key={`skeleton-${index}`} />
-        ))}
-      </ScrollView>
+      <>
+        <ScrollView contentContainerStyle={styles.feed}>
+          {[...Array(3)].map((_, index) => (
+            <Postskeleton key={`skeleton-${index}`} />
+          ))}
+        </ScrollView>
+        {uploadModal}
+      </>
     );
   }
 
   if (error && combinedPosts.length === 0) {
     return (
-      <ScrollView
-        contentContainerStyle={styles.emptyContainer}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />}
-      >
-        <Icon name="cloud-offline-outline" size={80} color="rgba(255, 255, 255, 0.3)" />
-        <Text style={styles.emptyTitle}>Connection Issue</Text>
-        <Text style={styles.emptySubtitle}>Unable to load posts. Please check your connection.</Text>
-        <TouchableOpacity style={styles.exploreButton} onPress={loadPopularPosts}>
-          <Icon name="refresh-outline" size={20} color="#fff" />
-          <Text style={styles.exploreButtonText}>Retry</Text>
-        </TouchableOpacity>
-      </ScrollView>
+      <>
+        <ScrollView
+          contentContainerStyle={styles.emptyContainer}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />}
+        >
+          <Icon name="cloud-offline-outline" size={80} color="rgba(255, 255, 255, 0.3)" />
+          <Text style={styles.emptyTitle}>Connection Issue</Text>
+          <Text style={styles.emptySubtitle}>Unable to load posts. Please check your connection.</Text>
+          <TouchableOpacity style={styles.exploreButton} onPress={loadPopularPosts}>
+            <Icon name="refresh-outline" size={20} color="#fff" />
+            <Text style={styles.exploreButtonText}>Retry</Text>
+          </TouchableOpacity>
+        </ScrollView>
+        {uploadModal}
+      </>
     );
   }
 
   return (
-    <ScrollView
-      contentContainerStyle={styles.feed}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />}
-    >
-      {combinedPosts.map((item, index) => {
-        const isFirstPopular = followingPosts?.length > 0 && index === followingPosts.length;
-
-        return (
-          <React.Fragment key={item.id || item.postId || index}>
-            {isFirstPopular && (
-              <View style={styles.sectionDivider}>
-                <View style={styles.dividerLine} />
-                <Text style={styles.sectionText}>🔥 Trending on Kaiwa</Text>
-                <View style={styles.dividerLine} />
-              </View>
-            )}
-            <Post
-              postsId={item.id || item.postId}
-              name={item.username || 'Anonymous'}
-              image={item.imageUrl || item.avatarUrl || null}
-              Avatar={item.userAvatar || null}
-              caption={item.caption || item.content || ''}
-              initialLikeCount={item.likeCount || item.likes || 0}
-              initialLikedBy={item.likedBy || []}
-              createdAt={item.createdAt}
-              userId={item.userId}
-               commentCount={item.commentCount || 0}    
-            />
-          </React.Fragment>
-        );
-      })}
-    </ScrollView>
+    <>
+      <FlatList
+        data={combinedPosts}
+        keyExtractor={(item, index) => String(item?.id || item?.postId || index)}
+        renderItem={renderFeedItem}
+        contentContainerStyle={styles.feed}
+        showsVerticalScrollIndicator={false}
+        // Avoid blank flashes (common on Android with heavy rows)
+        removeClippedSubviews={Platform.OS === 'ios'}
+        initialNumToRender={5}
+        maxToRenderPerBatch={8}
+        windowSize={11}
+        updateCellsBatchingPeriod={30}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#fff" />}
+      />
+      {uploadModal}
+    </>
   );
 };
 
@@ -490,5 +756,138 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     marginHorizontal: 15,
+  },
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-end',
+  },
+  modalContainer: {
+    backgroundColor: '#1e1e1e',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    width: '100%',
+    alignSelf: 'stretch',
+    maxHeight: '90%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+  },
+  modalTitle: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  shareButton: {
+    color: '#007AFF',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  disabledButton: {
+    color: '#666',
+  },
+  previewImage: {
+    width: '100%',
+    height: 300,
+    backgroundColor: '#333',
+  },
+  aspectRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 10,
+  },
+  aspectLabel: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 12,
+    fontWeight: '700',
+    marginRight: 6,
+  },
+  aspectChip: {
+    backgroundColor: '#0a0a0a',
+    borderWidth: 1,
+    borderColor: '#222',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  aspectChipActive: {
+    backgroundColor: '#0b2b4f',
+    borderColor: '#007AFF',
+  },
+  aspectChipText: {
+    color: '#bbb',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  aspectChipTextActive: {
+    color: 'white',
+  },
+  frameWrap: {
+    width: '100%',
+    backgroundColor: '#0b0d12',
+    borderTopWidth: 1,
+    borderTopColor: '#222',
+    borderBottomWidth: 1,
+    borderBottomColor: '#222',
+    overflow: 'hidden',
+    borderRadius: 12,
+    marginHorizontal: 12,
+  },
+  framedImage: {
+    width: '100%',
+    height: '100%',
+  },
+  expandToggle: {
+    position: 'absolute',
+    right: 12,
+    bottom: 12,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewPlaceholder: {
+    width: '100%',
+    height: 300,
+    backgroundColor: '#111',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderTopWidth: 1,
+    borderTopColor: '#222',
+    borderBottomWidth: 1,
+    borderBottomColor: '#222',
+  },
+  previewPlaceholderText: {
+    color: '#777',
+    fontSize: 14,
+  },
+  captionInput: {
+    color: 'white',
+    fontSize: 16,
+    padding: 16,
+    minHeight: 90,
+    textAlignVertical: 'top',
+  },
+  uploadingContainer: {
+    alignItems: 'center',
+    padding: 20,
+  },
+  uploadingText: {
+    color: '#666',
+    marginTop: 10,
   },
 });

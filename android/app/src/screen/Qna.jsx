@@ -3,7 +3,7 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, Image, StyleSheet,
-  SafeAreaView, Modal, FlatList, Dimensions, StatusBar, Platform, Alert, TextInput, RefreshControl
+   Modal, FlatList, Dimensions, StatusBar, Platform, Alert, TextInput, RefreshControl
 } from 'react-native';
 import { launchImageLibrary } from 'react-native-image-picker';
 import { useUserData } from '../users';
@@ -12,6 +12,8 @@ import auth from '@react-native-firebase/auth';
 import functions from '@react-native-firebase/functions'; // ADDED
 import { useNavigation, useFocusEffect, useRoute } from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/FontAwesome';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
 
 const { width } = Dimensions.get('window');
 const getStatusBarHeight = () => {
@@ -37,8 +39,11 @@ const Qna = () => {
   const navigation = useNavigation();
   const route = useRoute();
   const selectedQuestionIdFromRoute = route.params?.selectedQuestionId;
+  const selectedQuestionDataFromRoute = route.params?.selectedQuestionData; 
   
-  const [selectedQuestion, setSelectedQuestion] = useState(null);
+const [selectedQuestion, setSelectedQuestion] = useState(
+  route.params?.selectedQuestionData || null
+);
   const [authorProfiles, setAuthorProfiles] = useState({});
 
   const { 
@@ -467,20 +472,42 @@ const Qna = () => {
     }, [selectedQuestion?.id, authorProfiles, getCachedImageUri])
   );
 
-  useEffect(() => {
-    if (selectedQuestionIdFromRoute && questions.length > 0) {
-      const specificQuestion = questions.find(q => q.id === selectedQuestionIdFromRoute);
-      if (specificQuestion) {
-        setSelectedQuestion(specificQuestion);
+ useFocusEffect(
+  React.useCallback(() => {
+    const incomingData = route.params?.selectedQuestionData;
+    const incomingId = route.params?.selectedQuestionId;
+
+    // Case 1: full data (from profile)
+    if (incomingData) {
+      setSelectedQuestion(prev => {
+        if (prev?.id === incomingData.id) return prev;
+        return incomingData;
+      });
+      return;
+    }
+
+    // Case 2: fallback using ID
+    if (incomingId && questions.length > 0) {
+      const q = questions.find(item => item.id === incomingId);
+
+      if (q) {
+        setSelectedQuestion(prev => {
+          if (prev?.id === q.id) return prev;
+          return q;
+        });
       }
     }
-  }, [selectedQuestionIdFromRoute, questions]);
+  }, [route.params, questions])
+);
 
-  useEffect(() => {
-    if (selectedQuestionIdFromRoute && selectedQuestion) {
-      navigation.setParams({ selectedQuestionId: undefined });
-    }
-  }, [selectedQuestionIdFromRoute, selectedQuestion, navigation]);
+useEffect(() => {
+  if (selectedQuestion) {
+    navigation.setParams({
+      selectedQuestionId: undefined,
+      selectedQuestionData: undefined
+    });
+  }
+}, [selectedQuestion]);
 
   const toDate = (timestamp) => {
     if (!timestamp) return new Date();
@@ -1031,8 +1058,8 @@ const Qna = () => {
 
     return (
       <View style={styles.container}>
-        <StatusBar barStyle="light-content" backgroundColor="#1e1e1e" />
-        <View style={styles.statusBarSpacer} />
+        {/* <StatusBar barStyle="light-content" backgroundColor="#1e1e1e" /> */}
+        {/* <View style={styles.statusBarSpacer} /> */}
 
         <View style={styles.header}>
           <TouchableOpacity
@@ -1049,43 +1076,54 @@ const Qna = () => {
           </TouchableOpacity>
         </View>
 
-        <ScrollView style={styles.questionDetail}>
-          <View style={styles.questionDetailHeader}>
-            <Image source={{ uri: selectedQuestion.userImage }} style={styles.detailUserAvatar} />
-            <View style={styles.detailUserInfo}>
-              <Text style={styles.detailUsername}>@{selectedQuestion.username}</Text>
-              <Text style={styles.detailTimestamp}>{formatDate(selectedQuestion.timestamp)}</Text>
-            </View>
-          </View>
-          <Text style={styles.detailTitle}>{selectedQuestion.title}</Text>
-          <Text style={styles.detailContent}>{selectedQuestion.content}</Text>
-
-          {selectedQuestion.imageUrl && (
-            <Image source={{ uri: selectedQuestion.imageUrl }} style={styles.questionImage} />
-          )}
-
-          {selectedQuestion.tags && selectedQuestion.tags.length > 0 && (
-            <View style={styles.detailTagsContainer}>
-              {selectedQuestion.tags.map((tag, index) => (
-                <View key={index} style={styles.tagChip}>
-                  <Text style={styles.tagText}>#{tag}</Text>
+        <FlatList
+          data={sortedAnswers}
+          keyExtractor={(item, index) => String(item?.id || index)}
+          renderItem={({ item }) => <AnswerItem answer={item} />}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.questionDetail}
+          ListHeaderComponent={
+            <View>
+              <View style={styles.questionDetailHeader}>
+                <Image source={{ uri: selectedQuestion.userImage }} style={styles.detailUserAvatar} />
+                <View style={styles.detailUserInfo}>
+                  <Text style={styles.detailUsername}>@{selectedQuestion.username}</Text>
+                  <Text style={styles.detailTimestamp}>{formatDate(selectedQuestion.timestamp)}</Text>
                 </View>
-              ))}
-            </View>
-          )}
+              </View>
+              <Text style={styles.detailTitle}>{selectedQuestion.title}</Text>
+              <Text style={styles.detailContent}>{selectedQuestion.content}</Text>
 
-          <View style={styles.answersSection}>
-            <Text style={styles.answersTitle}>
-              {sortedAnswers.length === 0
-                ? 'No Answers Yet'
-                : `${sortedAnswers.length} ${sortedAnswers.length === 1 ? 'Answer' : 'Answers'}`
-              }
-            </Text>
-            {sortedAnswers.map((answer) => (
-              <AnswerItem key={answer.id} answer={answer} />
-            ))}
-          </View>
-        </ScrollView>
+              {selectedQuestion.imageUrl && (
+                <Image source={{ uri: selectedQuestion.imageUrl }} style={styles.questionImage} />
+              )}
+
+              {selectedQuestion.tags && selectedQuestion.tags.length > 0 && (
+                <View style={styles.detailTagsContainer}>
+                  {selectedQuestion.tags.map((tag, index) => (
+                    <View key={index} style={styles.tagChip}>
+                      <Text style={styles.tagText}>#{tag}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              <View style={styles.answersSection}>
+                <Text style={styles.answersTitle}>
+                  {sortedAnswers.length === 0
+                    ? 'No Answers Yet'
+                    : `${sortedAnswers.length} ${sortedAnswers.length === 1 ? 'Answer' : 'Answers'}`
+                  }
+                </Text>
+              </View>
+            </View>
+          }
+          ListEmptyComponent={
+            <View style={{ paddingBottom: 40 }}>
+              {/* Keep spacing consistent even with no answers */}
+            </View>
+          }
+        />
       </View>
     );
   });
@@ -1099,9 +1137,11 @@ const Qna = () => {
   }
 
   return (
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: '#1e1e1e' }}>
     <>
       {selectedQuestion ? <QuestionDetailView /> : questionListView}
     </>
+    </SafeAreaView>
   );
 };
 
@@ -1112,10 +1152,10 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#1e1e1e',
   },
-  statusBarSpacer: {
-    height: getStatusBarHeight(),
-    backgroundColor: '#1e1e1e',
-  },
+  // statusBarSpacer: {
+  //   height: getStatusBarHeight(),
+  //   backgroundColor: '#1e1e1e',
+  // },
   header: {
     flexDirection: 'row',
     justifyContent: 'center',
@@ -1124,7 +1164,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e0e0e0',
     height: 70,
-    paddingTop: getStatusBarHeight(),
+    paddingTop: 0,
     paddingHorizontal: 16,
   },
   headerTitle: {

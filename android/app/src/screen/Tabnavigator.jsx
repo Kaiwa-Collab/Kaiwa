@@ -13,13 +13,13 @@ import firstStack from '../firststack';
 const Tab = createBottomTabNavigator();
 
 export default function Tabnavigator() {
-  const { hasUnreadNotifications } = useNotifications();
+ const { hasUnreadNotifications, hasUnseenQuestions } = useNotifications();
 
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarStyle: { backgroundColor: '#2c2c32' },
+        tabBarStyle: { backgroundColor: '#2c2c32', },
         tabBarActiveTintColor: 'white',
         tabBarInactiveTintColor: 'gray',
         tabBarIcon: ({ focused, color, size }) => {
@@ -35,7 +35,10 @@ export default function Tabnavigator() {
             iconName = focused ? 'search' : 'search-outline';
           }
 
-          if (route.name === 'Search' && hasUnreadNotifications) {
+          if (
+            (route.name === 'Search' && hasUnreadNotifications) ||
+            (route.name === 'Profile' && hasUnseenQuestions)
+          ) {
             return (
               <View style={styles.iconWithBadge}>
                 <Ionicons name={iconName} size={size} color={color} />

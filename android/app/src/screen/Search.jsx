@@ -9,6 +9,7 @@ import functions from '@react-native-firebase/functions';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useUserData } from '../users'; 
 import ProjectDetailsModal from '../../service/ProjectDetailsModal';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 const getStatusBarHeight = () => Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0;
 
@@ -585,6 +586,7 @@ const linknormalization=(url)=>{
   };
 
   return (
+     <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: '#1e1e1e' }}>
     <View style={styles.container}>
       {searchActive ? (
         <View style={styles.overlay}>
@@ -611,6 +613,7 @@ const linknormalization=(url)=>{
       />
 
     </View>
+    </SafeAreaView>
   );
 };
 
@@ -620,10 +623,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#1e1e1e',
     paddingHorizontal: 16,
   },
-  statusBarSpacer: { 
-    height: getStatusBarHeight(), 
-    backgroundColor: '#1e1e1e' 
-  },
+  // statusBarSpacer: { 
+  //   height: getStatusBarHeight(), 
+  //   backgroundColor: '#1e1e1e' 
+  // },
   searchBar: {
     flexDirection: 'row',
     alignItems: 'center',
